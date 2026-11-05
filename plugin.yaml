@@ -1,0 +1,55 @@
+name: webgraft
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+description: "Local page and PDF extraction for web_extract, and the pages an answer really used, as clickable sources"
+author: ElSerda
+license: MIT
+requires_hermes: ">=0.22.6"
+tags: [web, research, citations, sources, extraction]
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+  - transform_tool_result
+  - transform_llm_output
+provides_web_providers:
+  - webgraft
+config_schema:
+  language:
+    type: str
+    choices: [auto, answer, en, fr]
+    default: auto
+    label: Footer language
+    description: "auto follows Hermes's display.language (English for languages other than en/fr); answer follows the language of the reply"
+  show_sources:
+    type: str
+    choices: [auto, always, never]
+    default: auto
+    label: List opened pages
+    description: "auto steps aside when another enabled plugin also rewrites replies (Hermes keeps only one rewrite); always adds the footer; never turns it off"
+  remind:
+    type: bool
+    default: true
+    label: Remind the model to open pages
+    description: "Adds a short reminder (about 70 tokens) to each user message: search snippets are not sources, open the pages"
+  one_url_per_call:
+    type: bool
+    default: true
+    label: One URL per web_extract call
+    description: "A web_extract call that asks for several URLs reads only the first, and its result lists the others: several long pages in one result can exceed a small model's context"
+  focus:
+    type: bool
+    default: true
+    label: Relevant passages first
+    description: "On a page longer than what Hermes shows the model (web.extract_char_limit), moves the passages that mention the question's terms to the top; nothing is removed"
+  llms_txt:
+    type: bool
+    default: true
+    label: Use the site's llms.txt
+    description: "When a site's llms.txt lists a Markdown (.md) version of the page, read that instead of the HTML; checked once per hour per site"
+  respect_ai_optout:
+    type: bool
+    default: true
+    label: Respect AI opt-outs
+    description: "A page that asks not to be used by AI (noai in X-Robots-Tag or a robots meta tag, or tdm-reservation: 1) comes back as an error instead of content"

@@ -1,0 +1,20 @@
+# Python dependencies of the webgraft Hermes plugin. Hermes reads this file when the plugin is
+# installed or enabled and installs them inside its own constraints (it does not install the plugin
+# itself as a package).
+#
+# Floors and why (tested with Hermes's Python 3.14 and its lxml 6 pin):
+#   trafilatura 1.10  oldest release that accepts lxml 6 (1.9 and older cap lxml below 6)
+# Documents (PDF, Office, EPUB) are read with anydoc, the converter Hermes ships for read_file
+# (`doc-extract` extra), so it is not declared here.
+# Crawl4AI is not listed here: `hermes webgraft setup` installs it in a separate environment
+# (crawl4ai>=0.9.1,<0.10; 0.9.0 and older need lxml 5, which has no Python 3.14 wheels).
+
+[project]
+name = "webgraft"
+version = "0.1.0"
+description = "Hermes Agent plugin: local page and document reading for web_extract, and the pages an answer used"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "trafilatura>=1.10,<3",
+]
