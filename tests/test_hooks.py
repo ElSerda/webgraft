@@ -130,7 +130,7 @@ def test_resumed_conversation_gets_its_earlier_pages_from_the_history():
 
 def test_reminder_asks_the_model_not_to_write_the_list():
     ctx = setup()
-    assert "do not write that list yourself" in ctx.hooks["pre_llm_call"](session_id="s1", user_message="q")
+    assert "do not write a sources list" in ctx.hooks["pre_llm_call"](session_id="s1", user_message="q")
 
 
 def test_sessions_do_not_share_pages():

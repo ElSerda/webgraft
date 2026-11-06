@@ -76,7 +76,8 @@ REMINDER = (
     "[webgraft] If you search the web for this message: search snippets are not sources. "
     "Open the most relevant results with web_extract, one URL per call, before answering. "
     "If a web_extract result lists pages it did not open, open the ones you still need. "
-    "The pages you open are listed under your answer; do not write that list yourself."
+    "webgraft itself adds the list of the pages you opened under your answer; "
+    "do not write a sources list or any URL."
 )
 # Hermes keeps the footer in the conversation, so a model sees it under its own earlier answers and
 # may copy it into an answer that opened nothing (seen in testing with a large cloud model). Said only then.
