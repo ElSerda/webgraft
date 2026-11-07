@@ -14,6 +14,7 @@ Hooks only, no extra model call:
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -72,13 +73,24 @@ def _pages(result: Any) -> list[dict]:
 
 # Added to the user's message, a trusted position: inside a tool result Hermes marks text as data
 # the model must not follow. Small models otherwise answer from snippets that happen to hold numbers.
+# Said to be a note, not the request: a model given a bare URL and this text once took the text
+# for the question and searched the web for it.
 REMINDER = (
-    "[webgraft] If you search the web for this message: search snippets are not sources. "
+    "[webgraft note to the assistant, not part of the user's message] "
+    "If you search the web for this message: search snippets are not sources. "
     "Open the most relevant results with web_extract, one URL per call, before answering. "
     "If a web_extract result lists pages it did not open, open the ones you still need. "
     "webgraft itself adds the list of the pages you opened under your answer; "
     "do not write a sources list or any URL."
 )
+# A message that holds a URL asks for that page, not for a search.
+URL_REMINDER = (
+    "[webgraft note to the assistant, not part of the user's message] "
+    "Open the URL in the user's message with web_extract, one URL per call, and answer from the page. "
+    "webgraft itself adds the list of the pages you opened under your answer; "
+    "do not write a sources list or any URL."
+)
+_URL = re.compile(r"https?://\S+", re.IGNORECASE)
 # Hermes keeps the footer in the conversation, so a model sees it under its own earlier answers and
 # may copy it into an answer that opened nothing (seen in testing with a large cloud model). Said only then.
 FOOTER_NOTE = (
@@ -131,7 +143,9 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
         _questions.move_to_end(session_id)
         while len(_questions) > MAX_SESSIONS:
             _questions.popitem(last=False)
-    parts = [REMINDER] if _setting("remind", True) else []
+    parts = []
+    if _setting("remind", True):
+        parts.append(URL_REMINDER if _URL.search(str(user_message or "")) else REMINDER)
     heading = _footer_in_history(conversation_history)
     if heading and compat.sources_mode(_setting("show_sources", "auto")) != "never":
         parts.append(FOOTER_NOTE.format(heading=heading))

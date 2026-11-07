@@ -96,7 +96,7 @@ hermes plugins install ElSerda/webgraft
 hermes webgraft setup
 ```
 
-Hermes asks before installing the plugin's one Python dependency (trafilatura). Then `setup`:
+Hermes asks before installing the plugin's one Python dependency (trafilatura). After a later `hermes plugins update webgraft`, run `hermes gateway restart` if a gateway is running: on Hermes 0.23 chat sessions run the plugin code the gateway loaded, and an update does not reload it. Then `setup`:
 
 1. chooses a search backend: your **SearXNG** instance (it checks that JSON output is enabled) or **DuckDuckGo** (`ddgs`, built into Hermes, no key);
 2. sets `web.extract_backend: webgraft`, and installs Hermes's document converter (`doc-extract`) if missing;
@@ -139,7 +139,7 @@ Under Settings → Plugins in Hermes Desktop, or `plugins.entries.webgraft.setti
 |---|---|---|
 | `language` | `auto` | Footer language: `auto` (Hermes's `display.language`; English for languages other than en/fr), `answer` (the reply's language), `en` or `fr` |
 | `show_sources` | `auto` | `auto`: list the opened pages, unless another plugin also rewrites replies (see below). `always`: list them anyway. `never`: no list |
-| `remind` | `true` | Add a short reminder to each user message (about 70 tokens): search snippets are not sources, open the pages, and open the pages a multi-URL call left out |
+| `remind` | `true` | Add a short note to each user message (about 70 tokens), marked as a note and not the request: search snippets are not sources, open the pages, and open the pages a multi-URL call left out. When the message holds a URL, the note asks to open that page instead of searching |
 | `one_url_per_call` | `true` | A `web_extract` call that asks for several URLs reads only the first; the result lists the others |
 | `focus` | `true` | On a page longer than what Hermes shows the model, put the passages about the question first (nothing is removed) |
 | `llms_txt` | `true` | When the site's `llms.txt` lists a Markdown version of the page, read that instead of the HTML |

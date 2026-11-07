@@ -133,6 +133,24 @@ def test_reminder_asks_the_model_not_to_write_the_list():
     assert "do not write a sources list" in ctx.hooks["pre_llm_call"](session_id="s1", user_message="q")
 
 
+def test_reminder_is_marked_as_a_note_not_the_request():
+    ctx = setup()
+    out = ctx.hooks["pre_llm_call"](session_id="s1", user_message="q")
+    assert out.startswith("[webgraft note to the assistant, not part of the user's message]")
+
+
+def test_a_message_with_a_url_asks_for_the_page_not_a_search():
+    ctx = setup()
+    h = ctx.hooks["pre_llm_call"]
+    out = h(session_id="s1", user_message="https://kissbot.bzh/llms.txt")
+    assert "Open the URL in the user's message with web_extract" in out
+    assert "search" not in out
+    assert "do not write a sources list" in out
+    out = h(session_id="s1", user_message="what does HTTP://Example.org/a say about pricing?")
+    assert "Open the URL in the user's message" in out
+    assert "snippets are not sources" in h(session_id="s1", user_message="price of example.org plus plan")
+
+
 def test_sessions_do_not_share_pages():
     ctx = setup()
     run_turn(ctx, "La formule Plus coûte 20 $.", [("web_extract", extract_result(PAGE))], session="a")
