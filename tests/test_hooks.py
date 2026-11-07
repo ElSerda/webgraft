@@ -128,6 +128,24 @@ def test_resumed_conversation_gets_its_earlier_pages_from_the_history():
     assert "guide.example" not in out
 
 
+SEARCH = json.dumps({"success": True, "data": {"web": [
+    {"title": "RTX 5080 specs", "url": "https://specs.example/5080", "description": "Boost clock 2617 MHz, 16 GB GDDR7."}]}})
+
+
+def test_values_taken_from_search_snippets_are_named():
+    ctx = setup()
+    out = run_turn(ctx, "The boost clock is 2617 MHz and the TGP 360 W.", [("web_search", SEARCH)])
+    assert out.endswith("No page opened: this answer relies on search snippets only.\n"
+                        "From search snippets, not from an opened page: 2617 MHz")
+    # A value read on an opened page is not blamed on the snippets, even if a snippet also holds it.
+    page = {"url": "https://nvidia.example/5080", "content": "Boost Clock: 2617 MHz. Total Graphics Power: 360 W."}
+    out = run_turn(ctx, "Boost 2617 MHz, 360 W.", [("web_search", SEARCH), ("web_extract", extract_result(page))], session="s2")
+    assert "From search snippets" not in out
+    # A search that found nothing the answer uses adds no line.
+    out = run_turn(ctx, "The card costs $999.", [("web_search", SEARCH)], session="s3")
+    assert "From search snippets" not in out
+
+
 def test_reminder_asks_the_model_not_to_write_the_list():
     ctx = setup()
     assert "do not write a sources list" in ctx.hooks["pre_llm_call"](session_id="s1", user_message="q")
@@ -143,8 +161,9 @@ def test_a_message_with_a_url_asks_for_the_page_not_a_search():
     ctx = setup()
     h = ctx.hooks["pre_llm_call"]
     out = h(session_id="s1", user_message="https://kissbot.bzh/llms.txt")
-    assert "Open the URL in the user's message with web_extract" in out
-    assert "search" not in out
+    assert out.startswith("[webgraft note to the assistant, not part of the user's message] Open the URL in the user's message")
+    assert "If you search the web for this message" not in out
+    assert "If it cannot be read, say so" in out and "snippets are not sources" in out
     assert "do not write a sources list" in out
     out = h(session_id="s1", user_message="what does HTTP://Example.org/a say about pricing?")
     assert "Open the URL in the user's message" in out

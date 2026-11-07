@@ -85,7 +85,7 @@ That is what the documentation says.
 
 ## Which pages are listed
 
-Every page `web_extract` returned with real content in this turn. A page opened in an earlier turn of the conversation is added under "Also used, opened earlier in this conversation" when the answer contains one of its values with a unit, a price or a version: an answer may rely on a page read a few turns before. When no page was opened, the footer says that the answer relies on search snippets only.
+Every page `web_extract` returned with real content in this turn. A page opened in an earlier turn of the conversation is added under "Also used, opened earlier in this conversation" when the answer contains one of its values with a unit, a price or a version: an answer may rely on a page read a few turns before. When no page was opened, the footer says that the answer relies on search snippets only. When the turn searched and the answer holds a value (with a unit, a price or a version) that appears in the search snippets but on no page read in the conversation, a last line names it: "From search snippets, not from an opened page: 2617 MHz". That is a presence check on the number and its unit, not a judgement of the value.
 
 ## Install
 

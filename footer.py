@@ -10,12 +10,14 @@ _TEXT = {
         "earlier": "Also used, opened earlier in this conversation:",
         "snippets": "No page opened: this answer relies on search snippets only.",
         "no_page": "No page could be read.",
+        "from_snippets": "From search snippets, not from an opened page: ",
     },
     "fr": {
         "sources": "Sources (pages ouvertes) :",
         "earlier": "Aussi utilisées, ouvertes plus tôt dans la conversation :",
         "snippets": "Aucune page ouverte : réponse basée sur les extraits de recherche.",
         "no_page": "Aucune page n'a pu être lue.",
+        "from_snippets": "Venues des extraits de recherche, pas d'une page ouverte : ",
     },
 }
 
@@ -66,8 +68,9 @@ def _source_line(url: str, titles: dict[str, str]) -> str:
 
 
 def build(opened: list[str], searched: bool, lang: str, earlier: list[str] | None = None,
-          titles: dict[str, str] | None = None) -> str:
-    """opened: pages read in this turn. earlier: pages from previous turns the answer relies on."""
+          titles: dict[str, str] | None = None, from_snippets: list[str] | None = None) -> str:
+    """opened: pages read in this turn. earlier: pages from previous turns the answer relies on.
+    from_snippets: values of the answer found only in search snippets, as written in the answer."""
     t = _TEXT[lang]
     titles = titles or {}
     lines: list[str] = []
@@ -79,4 +82,6 @@ def build(opened: list[str], searched: bool, lang: str, earlier: list[str] | Non
         lines.extend(_source_line(url, titles) for url in earlier)
     if not lines:
         lines.append(t["snippets"] if searched else t["no_page"])
+    if from_snippets:
+        lines.append(t["from_snippets"] + ", ".join(from_snippets))
     return "\n".join(lines)

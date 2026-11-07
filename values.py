@@ -65,6 +65,12 @@ _QUANTITY_RE = re.compile(
     rf"(?<![\w.,])({_NUM})\s?({_UNIT_ALT})(?![\w/])",
     re.IGNORECASE,
 )
+# On a page, a table cell may glue its label to the number ("Fréquence de base2,30 Ghz") and a footnote
+# mark may follow the unit ("2.6 Gbps1."): the unit still has to be there, so both are accepted.
+_PAGE_QUANTITY_RE = re.compile(
+    rf"(?<![\d.,])({_NUM})\s?({_UNIT_ALT})(?![a-z/])",
+    re.IGNORECASE,
+)
 _PRICE_RE = re.compile(
     rf"(?:([$€£])\s?({_NUM}))|(?:(?<![\w.,])({_NUM})\s?([$€£]|usd|eur|gbp)(?![\w]))",
     re.IGNORECASE,
@@ -119,6 +125,17 @@ def _numbers(raw: str) -> frozenset[str]:
     return frozenset(out)
 
 
+def _readings(text: str, m: re.Match) -> frozenset[str]:
+    """The number's readings; "Gen 5 450 W" also reads as 450, the 5 belonging to the word before."""
+    raw = m.group(1).strip()
+    values = _numbers(raw)
+    before = text[max(0, m.start() - 12):m.start()]
+    # A name such as Gen, PCIe or USB4 before a one-digit group; "de 1 000" in prose keeps one reading.
+    if re.fullmatch(r"\d[    ](?!000)\d{3}", raw) and re.search(r"(?:[A-Z][A-Za-z]*|\w*\d\w*)\s$", before):
+        values |= _numbers(raw[2:])
+    return values
+
+
 def _unit(spelling: str) -> str:
     return UNIT_SPELLINGS.get(spelling.lower(), spelling.lower())
 
@@ -153,7 +170,7 @@ def extract_facts(answer: str) -> list[Fact]:
         cur = _CURRENCIES[(m.group(1) or m.group(4)).lower()]
         add(m.span(), Fact(m.group(0).strip(), "price", _numbers(num), cur))
     for m in _QUANTITY_RE.finditer(text):
-        add(m.span(), Fact(m.group(0).strip(), "quantity", _numbers(m.group(1)), _unit(m.group(2))))
+        add(m.span(), Fact(m.group(0).strip(), "quantity", _readings(text, m), _unit(m.group(2))))
     for m in _BARE_RE.finditer(text):
         values = _numbers(m.group(1))
         # Small bare numbers are list counts, ordinals and generations: too common to mean anything.
@@ -174,7 +191,7 @@ class _Occurrence:
 def index_page(url: str, text: str) -> list[_Occurrence]:
     text = _clean(text)
     occ = []
-    for m in _QUANTITY_RE.finditer(text):
+    for m in _PAGE_QUANTITY_RE.finditer(text):
         occ.append(_Occurrence(url, _numbers(m.group(1)), _unit(m.group(2))))
     for m in _PRICE_RE.finditer(text):
         num = m.group(2) or m.group(3)
@@ -193,18 +210,44 @@ def _line(text: str, pos: int) -> str:
     return text[start:end if end >= 0 else len(text)].lower()
 
 
+# Written for each other in practice: "Gb/s" is gigabits on a router page and "GB/s" gigabytes on a GPU page.
+_SAME_UNIT = {"gbps": "gb/s", "mbps": "mb/s"}
+
+
+def _family(unit: str) -> str:
+    return _SAME_UNIT.get(unit, unit)
+
+
 def _matches(fact: Fact, occ: _Occurrence) -> bool:
     if not (fact.values & occ.values):
         return False
     if fact.kind == "version":
         return occ.unit == "version"
     if fact.kind in ("quantity", "price"):
-        if occ.unit == fact.unit:
+        if _family(occ.unit) == _family(fact.unit):
             return True
         # A table row such as "| AI TOPS | 2064 |" puts the unit before the number.
-        spellings = _UNITS.get(fact.unit, (fact.unit,))
+        spellings = [sp for u, sps in _UNITS.items() if _family(u) == _family(fact.unit) for sp in sps] or [fact.unit]
         return occ.unit == "" and any(re.search(rf"(?<!\w){re.escape(sp)}(?!\w)", occ.line) for sp in spellings)
     return True
+
+
+def only_in(answer: str, snippets: str, page_texts: list[str]) -> list[str]:
+    """Values of the answer (with a unit, a currency or a version) found in the search snippets but in no
+    opened page's text, as written in the answer. Mechanical: presence of the number and unit, nothing more."""
+    if not snippets.strip():
+        return []
+    facts = [f for f in extract_facts(answer) if f.kind != "number"]
+    if not facts:
+        return []
+    in_snippets = index_page("", snippets)
+    in_pages = [o for text in page_texts if text for o in index_page("", text)]
+    out: list[str] = []
+    for fact in facts:
+        if any(_matches(fact, o) for o in in_snippets) and not any(_matches(fact, o) for o in in_pages):
+            if fact.text not in out:
+                out.append(fact.text)
+    return out
 
 
 def pages_used(answer: str, pages: list[dict]) -> list[str]:

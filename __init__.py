@@ -71,6 +71,13 @@ def _pages(result: Any) -> list[dict]:
     ]
 
 
+def _snippets(result: Any) -> str:
+    """The titles and descriptions of a web_search result, as one text."""
+    data = _payload(result).get("data")
+    hits = (data or {}).get("web") if isinstance(data, dict) else None
+    return "\n".join(f"{h.get('title') or ''}\n{h.get('description') or ''}" for h in hits or [] if isinstance(h, dict))
+
+
 # Added to the user's message, a trusted position: inside a tool result Hermes marks text as data
 # the model must not follow. Small models otherwise answer from snippets that happen to hold numbers.
 # Said to be a note, not the request: a model given a bare URL and this text once took the text
@@ -87,6 +94,8 @@ REMINDER = (
 URL_REMINDER = (
     "[webgraft note to the assistant, not part of the user's message] "
     "Open the URL in the user's message with web_extract, one URL per call, and answer from the page. "
+    "If it cannot be read, say so; if you then search, search snippets are not sources: open the most "
+    "relevant results with web_extract before answering. "
     "webgraft itself adds the list of the pages you opened under your answer; "
     "do not write a sources list or any URL."
 )
@@ -236,9 +245,10 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
             del texts[1:-3]  # the user's message and the last three queries
     pages = _pages(result) if tool_name == "web_extract" else []
     with _lock:
-        turn = _turns.setdefault(session_id, {"opened": [], "searched": False})
+        turn = _turns.setdefault(session_id, {"opened": [], "searched": False, "snippets": ""})
         if tool_name == "web_search":
             turn["searched"] = True
+            turn["snippets"] = (turn["snippets"] + "\n" + _snippets(result))[-20_000:]
         for page in pages:
             _remember(session_id, page["url"], page["title"], page["content"])
             if page["url"] not in turn["opened"]:
@@ -265,8 +275,11 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
     earlier = values.pages_used(response_text, earlier_pages) if earlier_pages else []
     if turn is None and not earlier:
         return None  # a turn without web tools that does not draw on an earlier page
+    # Values the answer took from search snippets rather than from a page anyone read.
+    from_snippets = values.only_in(response_text, (turn or {}).get("snippets", ""),
+                                   [c for _, c in known.values()]) if turn and turn["searched"] else []
     lang = footer.language_of(response_text, _setting("language", "auto"))
-    text = footer.build(opened, bool(turn and turn["searched"]), lang, earlier, titles)
+    text = footer.build(opened, bool(turn and turn["searched"]), lang, earlier, titles, from_snippets)
     # Keep the answer byte for byte: Hermes then prints only the added footer after a streamed reply.
     return f"{response_text}\n\n{text}" if text else None
 

@@ -57,6 +57,27 @@ def test_bare_numbers_do_not_mark_a_page_as_used():
     assert used("Il y a 1 000 sièges.") == []
 
 
+def test_page_values_glued_to_a_label_or_a_footnote_still_count():
+    page = [{"url": "https://spec.example", "content": "Fréquence de base2,30 Ghz | -\nSpeeds up to 2.6 Gbps1. Wi-Fi 6"}]
+    assert values.pages_used("Fréquence de base : 2,30 GHz", page) == [page[0]["url"]]
+    assert values.pages_used("Jusqu'à 2,6 Gbit/s en 5G.", page) == [page[0]["url"]]
+    # The answer side stays strict: a letter glued to a number is a code, not a value.
+    assert values.extract_facts("Fréquence de base2,30 Ghz") == []
+
+
+def test_bits_and_bytes_per_second_are_written_for_each_other():
+    page = [{"url": "https://router.example", "content": "offering speeds up to 2.6 Gbps and 1 Gbps on the LAN port"}]
+    assert values.pages_used("Environ 2,6 Gb/s en 5G et 1 Gb/s en LAN.", page) == [page[0]["url"]]
+    assert values.pages_used("Environ 2,6 Mb/s.", page) == []
+
+
+def test_a_one_digit_group_after_a_name_belongs_to_the_name():
+    page = [{"url": "https://psu.example", "content": "One 450 W or greater PCIe Gen 5 cable."}]
+    assert values.pages_used("1 câble PCIe Gen 5 450 W+ (adaptateur fourni)", page) == [page[0]["url"]]
+    assert sorted(values.extract_facts("1 câble PCIe Gen 5 450 W+")[0].values) == ["450", "5450"]
+    assert sorted(values.extract_facts("un débit de 1 000 Mbit/s")[0].values) == ["1000"]  # prose keeps one reading
+
+
 def test_small_numbers_codes_and_model_sources_are_skipped():
     assert values.extract_facts("Agents de 2e génération, 3 profils, 2 à 3 fois moins.") == []
     assert [f.text for f in values.extract_facts("Référence NP-400-A1, alimentation 24V-3×8.")] == []
