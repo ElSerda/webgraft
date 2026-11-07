@@ -43,6 +43,11 @@ MAX_CONTENT_CHARS = 30_000  # what one page may hand to the model
 # What a page is read up to, before focus.arrange() picks what comes first and the cut above.
 READ_CHARS = 400_000
 MAX_COMPLEMENT_CHARS = 8_000
+# Links of the page whose text is in the content, listed under it so the model can open the
+# next page (a product in a listing, an article in an index) without a search. Kept short enough
+# to stay in the tail of Hermes's per-page window.
+MAX_LINKS = 40
+MAX_LINKS_CHARS = 3_000
 BROWSERS_AT_ONCE = 3  # each Crawl4AI call starts its own headless Chromium
 SHORT_PAGE_CHARS = 1_500
 CRAWL4AI_ENV = "webgraft-crawl4ai"
@@ -82,15 +87,17 @@ class Page:
     content: str = ""
     error: str = ""
     engine: str = ""
+    links: str = ""  # "- text: url" lines, see page_links()
 
     def as_result(self, terms: list[str] | None = None, window: int = 0) -> dict:
         """The provider's dict for this page, cut to MAX_CONTENT_CHARS; with `terms`, a long page
-        has its passages about them first (focus.arrange)."""
+        has its passages about them first (focus.arrange). The page's links come last."""
         text = self.content
         if terms and not self.error:
             from .focus import arrange
             text = arrange(text, terms, window or 15_000)
-        text = text[:MAX_CONTENT_CHARS]
+        tail = f"\n\n## Links on this page\n{self.links}" if self.links and not self.error else ""
+        text = text[:MAX_CONTENT_CHARS - len(tail)] + tail
         out = {"url": self.url, "title": self.title, "content": text, "raw_content": text,
                "metadata": {"engine": self.engine} if self.engine else {}}
         if self.error:
@@ -132,6 +139,52 @@ def strip_links(markdown: str) -> str:
     text = re.sub(r"<https?://[^>]+>", "", text)
     text = re.sub(r"[ \t]+\n", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+_HTML_LINK_RE = re.compile(r"<a\s[^>]*?href\s*=\s*[\"']([^\"'#]+)[^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
+_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)")
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def page_links(html: str, browser_md: str, url: str, content: str) -> str:
+    """The page's links whose text appears in `content`, one "- text: url" line each.
+
+    trafilatura and strip_links() keep a link's text and drop its target, so a model reading a
+    listing (products, search results, an index) sees names it cannot open. The links of the
+    HTML, then of the browser view, are listed in page order when their text is in the content:
+    navigation and footers, which the extraction already dropped, stay out. MAX_LINKS lines,
+    MAX_LINKS_CHARS at most.
+    """
+    from html import unescape
+    from urllib.parse import urljoin, urldefrag
+
+    if not content.strip():
+        return ""
+    haystack = re.sub(r"\s+", " ", content).casefold()
+    page = urldefrag(url)[0].rstrip("/")
+    seen_urls: set[str] = {page}
+    seen_texts: set[str] = set()
+    out: list[str] = []
+    size = 0
+    found = [(h, t) for h, t in _HTML_LINK_RE.findall(html or "")] + [(h, t) for t, h in _MD_LINK_RE.findall(browser_md or "")]
+    for href, raw in found:
+        text = re.sub(r"\s+", " ", unescape(_TAG_RE.sub(" ", raw))).strip()
+        if len(text) < 3 or not re.search(r"[^\W\d_]", text):
+            continue
+        target = urldefrag(urljoin(url, unescape(href.strip())))[0].rstrip("/")
+        if not target.startswith(("http://", "https://")) or target in seen_urls:
+            continue
+        key = text.casefold()
+        if key in seen_texts or key not in haystack:
+            continue
+        line = f"- {text[:120]}: {target}"
+        if len(out) >= MAX_LINKS or size + len(line) + 1 > MAX_LINKS_CHARS:
+            break
+        out.append(line)
+        size += len(line) + 1
+        seen_urls.add(target)
+        seen_texts.add(key)
+    return "\n".join(out)
 
 
 def _value_keys(text: str) -> set[tuple[str, str]]:
@@ -546,7 +599,7 @@ async def _read_page_itself(client, url: str, slots: asyncio.Semaphore | None = 
     title = title or view_title
     if not content.strip():
         return Page(url, title, error=_origin(status, blocked or "no readable text on the page"))
-    return Page(url, title, content, engine=engine)
+    return Page(url, title, content, engine=engine, links=page_links(html, browser_md, url, content))
 
 
 async def read_pages(urls: list[str]) -> list[Page]:

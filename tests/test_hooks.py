@@ -220,3 +220,13 @@ def test_model_is_told_the_footer_under_its_earlier_answers_is_not_its_own():
     assert "not written by you" not in plain
     ctx = setup({"remind": False})
     assert "not written by you" in ctx.hooks["pre_llm_call"](session_id="s3", user_message="q", conversation_history=history)
+
+
+def test_an_empty_search_gets_a_note_and_a_search_with_results_does_not():
+    ctx = setup()
+    hook = ctx.hooks["transform_tool_result"]
+    out = hook(tool_name="web_search", result=json.dumps({"success": True, "data": {"web": []}}), session_id="s1")
+    assert "does not show that something does not exist" in json.loads(out)["webgraft_note"]
+    assert hook(tool_name="web_search", result=SEARCH, session_id="s1") is None
+    assert hook(tool_name="web_search", result=json.dumps({"success": False, "error": "SearXNG unreachable"}), session_id="s1") is None
+    assert hook(tool_name="web_extract", result=extract_result(PAGE), session_id="s1") is None

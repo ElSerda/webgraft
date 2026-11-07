@@ -264,10 +264,14 @@ def _check_searxng(url: str) -> str:
     if r.status_code >= 400:
         return f"SearXNG answered HTTP {r.status_code}"
     try:
-        n = len(r.json().get("results", []))
+        data = r.json()
+        n = len(data.get("results", []))
     except ValueError:
         return "SearXNG did not answer JSON (is this the instance URL?)"
-    return "" if n else "SearXNG answered, but with 0 results (are its engines enabled?)"
+    if n:
+        return ""
+    down = ", ".join(f"{e[0]} ({e[1]})" for e in data.get("unresponsive_engines") or [] if isinstance(e, (list, tuple)) and e)
+    return "SearXNG answered, but with 0 results " + (f"(engines not answering: {down})" if down else "(are its engines enabled?)")
 
 
 def step_search(args, s: dict, interactive: bool) -> None:

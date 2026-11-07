@@ -130,3 +130,45 @@ def test_challenge_phrases_still_count_on_long_pages_but_plain_words_do_not():
 def test_a_long_page_about_captchas_keeps_its_title():
     assert ex.looks_blocked("CAPTCHA - Encyclopedia", "A CAPTCHA is a type of challenge-response test. " * 60) == ""
     assert ex.looks_blocked("Access Denied", "You don't have permission to access this server.")  # short: a wall
+
+
+LISTING_HTML = """
+<nav><a href="/">Home</a> <a href="/account">My account</a></nav>
+<h1>Cloud plans</h1>
+<ul>
+<li><a href="/plans/plus"><b>Plus</b> plan</a> $20 / month</li>
+<li><a href="https://portal.example/plans/super">Super plan</a> $100 / month</li>
+<li><a href="/plans/super#faq">Super plan</a> (same page, fragment)</li>
+<li><a href="/plans/ultra">Ultra plan</a> $200 / month</li>
+<li><a href="/plans/x">x</a></li>
+</ul>
+<footer><a href="/privacy">Privacy</a></footer>
+"""
+LISTING_TEXT = "Cloud plans\nPlus plan $20 / month\nSuper plan $100 / month\nUltra plan $200 / month"
+
+
+def test_links_whose_text_is_in_the_content_are_listed_in_page_order():
+    links = ex.page_links(LISTING_HTML, "", "https://portal.example/plans", LISTING_TEXT)
+    assert links.splitlines() == [
+        "- Plus plan: https://portal.example/plans/plus",
+        "- Super plan: https://portal.example/plans/super",
+        "- Ultra plan: https://portal.example/plans/ultra",
+    ]  # navigation and footer links are not in the text; "x" is too short; one URL, one line
+
+
+def test_links_come_from_the_browser_view_too_and_the_page_itself_is_skipped():
+    md = "[Cloud plans](https://portal.example/plans) [Ultra plan](https://portal.example/plans/ultra)"
+    assert ex.page_links("", md, "https://portal.example/plans/", "Cloud plans\nUltra plan $200") == \
+        "- Ultra plan: https://portal.example/plans/ultra"
+    assert ex.page_links(LISTING_HTML, "", "https://portal.example/plans", "") == ""
+
+
+def test_links_section_is_capped_and_kept_under_the_content_cap():
+    html = "".join(f'<a href="/p/{i}">Product number {i}</a>' for i in range(100))
+    text = " ".join(f"Product number {i}" for i in range(100))
+    links = ex.page_links(html, "", "https://shop.example/", text)
+    assert len(links.splitlines()) <= ex.MAX_LINKS and len(links) <= ex.MAX_LINKS_CHARS
+    page = ex.Page("https://shop.example/", "Shop", "word " * 10_000, engine="trafilatura", links=links)
+    out = page.as_result()["content"]
+    assert len(out) <= ex.MAX_CONTENT_CHARS and out.endswith(links) and "## Links on this page" in out
+    assert "Links on this page" not in ex.Page("https://shop.example/", error="HTTP 404 from origin", links=links).as_result()["raw_content"]

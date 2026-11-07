@@ -213,25 +213,49 @@ def _guard_tool(tool_name: str = "", args: Any = None, session_id: str = "", too
     return directive
 
 
-def _note_held(tool_name: str = "", result: Any = None, session_id: str = "", tool_call_id: Any = None,
-               **_: Any) -> Optional[str]:
-    """Adds to a web_extract result the URLs that _guard_tool left out of the call."""
-    if tool_name != "web_extract":
+EMPTY_SEARCH_NOTE = ("This search returned no result. A self-hosted search backend also answers nothing when "
+                     "the engines behind it rate-limit it, which several searches sent at once trigger. "
+                     "An empty search does not show that something does not exist: search again with one "
+                     "query at a time and other words, or open a page that lists it.")
+
+
+def _annotate(tool_name: str = "", result: Any = None, session_id: str = "", tool_call_id: Any = None,
+              **_: Any) -> Optional[str]:
+    """Adds a webgraft_note to two tool results: a web_extract call whose other URLs _guard_tool
+    left out (they are listed), and a web_search that found nothing (an empty result is not an absence)."""
+    if tool_name == "web_extract":
+        with _lock:
+            held = _held.pop(_call_key(session_id, tool_call_id), None)
+        if not held:
+            return None
+        note = ("webgraft reads one URL per web_extract call, so each page fits in the context. "
+                "This call read only the first URL. Not opened: " + ", ".join(held))
+    elif tool_name == "web_search":
+        data = _json(result)
+        if not isinstance(data, dict) or not data.get("success"):
+            return None
+        hits = (data.get("data") or {}).get("web") if isinstance(data.get("data"), dict) else None
+        if hits != []:
+            return None
+        note = EMPTY_SEARCH_NOTE
+    else:
         return None
-    with _lock:
-        held = _held.pop(_call_key(session_id, tool_call_id), None)
-    if not held or not isinstance(result, str):
+    if not isinstance(result, str):
         return None
-    note = ("webgraft reads one URL per web_extract call, so each page fits in the context. "
-            "This call read only the first URL. Not opened: " + ", ".join(held))
-    try:
-        data = json.loads(result)
-    except ValueError:
-        return f"{result}\n\n[{note}]"
+    data = _json(result)
     if not isinstance(data, dict):
         return f"{result}\n\n[{note}]"
     data["webgraft_note"] = note
     return json.dumps(data, ensure_ascii=False)
+
+
+def _json(result: Any) -> Any:
+    if not isinstance(result, str):
+        return None
+    try:
+        return json.loads(result)
+    except ValueError:
+        return None
 
 
 def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", args: Any = None,
@@ -292,7 +316,7 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", _start_turn)
     ctx.register_hook("pre_tool_call", _guard_tool)
     ctx.register_hook("post_tool_call", _record_tool)
-    ctx.register_hook("transform_tool_result", _note_held)
+    ctx.register_hook("transform_tool_result", _annotate)
     ctx.register_hook("transform_llm_output", _append_footer)
     skills = Path(__file__).parent / "skills"
     if hasattr(ctx, "register_skill") and skills.is_dir():

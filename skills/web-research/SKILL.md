@@ -49,8 +49,12 @@ and any search backend for `web_search`.
    If you pass several URLs, only the first is read and `webgraft_note` lists the others:
    open the ones you still need, each in its own call.
 4. If a result returns `error`, open the next result. One failure never ends the research.
-5. If the pages do not answer the question, search again with different words, up to 3 searches.
-6. Answer using only facts found in the pages you opened. Keep numbers and units as written.
+5. A page's result ends with "Links on this page": to open a product, an article or a section it
+   names, take its URL there instead of searching for it.
+6. If the pages do not answer the question, search again with different words, up to 3 searches,
+   one at a time. A search with no result is not proof that something does not exist: the search
+   engines may be rate-limiting; search again with other words or open a page that lists it.
+7. Answer using only facts found in the pages you opened. Keep numbers and units as written.
 
 ## Pitfalls
 
