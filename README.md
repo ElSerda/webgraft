@@ -169,6 +169,7 @@ Hermes runs every plugin's `transform_llm_output` hook but keeps only the first 
 - The footer says which pages the answer was built from. It does not check that each sentence of the answer matches them: that would take another model call per reply and still not be reliable.
 - An earlier page is matched on values with a unit, a price or a version; an answer that reuses only its prose is not linked to it.
 - Pages behind logins or strong bot protection cannot be read; they come back as errors.
+- Hermes refuses private and internal addresses (127.0.0.1, 10.x, 192.168.x, link-local) before any extraction backend runs: an agent reading untrusted pages must not be able to reach your network. The result is "Blocked: URL targets a private or internal network address". To read pages on your own LAN, set `security.allow_private_urls: true` in Hermes's `config.yaml`; cloud metadata addresses stay blocked.
 - Hermes keeps `web_extract` results for 20 minutes (`web.cache_ttl_minutes`), across sessions, and a cached page does not go through webgraft again: within that time a page keeps the order `focus` gave it for the first question. Nothing is removed either way, and `web.cache_enabled: false` turns the cache off.
 - `focus` matches words, not meaning: a question worded differently from the page (a synonym, another language) may move nothing, and the page then reaches the model as before. The model can still page through the full text with `read_file`.
 
