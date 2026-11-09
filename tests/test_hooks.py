@@ -248,3 +248,4 @@ def test_the_skill_is_registered_under_the_plugin_name_with_its_description():
     assert path.name == "SKILL.md" and path.parent.name == "webgraft"
     assert description == "Answer web questions from opened pages, not snippets."
     assert frontmatter["name"] == "webgraft" and frontmatter["version"] == "1.3.0"
+    assert frontmatter["platforms"] == ["linux", "macos", "windows"]  # a list, or Hermes hides the skill on every OS

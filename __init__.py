@@ -320,11 +320,19 @@ def _frontmatter(path: Path) -> dict:
         kv = re.match(r"([A-Za-z_][\w-]*):\s*(.*)$", line)
         if kv and not line.startswith((" ", "\t")):
             value = kv.group(2).strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                value = value[1:-1]
-            if value != "":
-                meta[kv.group(1)] = value
+            if value.startswith("[") and value.endswith("]"):  # flow list: platforms: [linux, macos, windows]
+                items = [_unquote(item) for item in value[1:-1].split(",")]
+                meta[kv.group(1)] = [item for item in items if item]
+            elif _unquote(value) != "":
+                meta[kv.group(1)] = _unquote(value)
     return meta
+
+
+def _unquote(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
 
 
 def register(ctx) -> None:
