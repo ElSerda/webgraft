@@ -308,6 +308,25 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
     return f"{response_text}\n\n{text}" if text else None
 
 
+def _frontmatter(path: Path) -> dict:
+    """Top-level scalar keys of a SKILL.md front matter (``key: value`` lines between the ``---`` markers)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    m = re.match(r"---\r?\n(.*?)\r?\n---", text, re.S)
+    meta: dict = {}
+    for line in (m.group(1).splitlines() if m else []):
+        kv = re.match(r"([A-Za-z_][\w-]*):\s*(.*)$", line)
+        if kv and not line.startswith((" ", "\t")):
+            value = kv.group(2).strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            if value != "":
+                meta[kv.group(1)] = value
+    return meta
+
+
 def register(ctx) -> None:
     global _ctx
     _ctx = ctx
@@ -322,7 +341,9 @@ def register(ctx) -> None:
     if hasattr(ctx, "register_skill") and skills.is_dir():
         for child in sorted(skills.iterdir()):
             if (child / "SKILL.md").is_file():
-                ctx.register_skill(child.name, child / "SKILL.md")  # loads as webgraft:<name>
+                meta = _frontmatter(child / "SKILL.md")
+                # Resolvable as webgraft:<name> only; the description shows in skills_list and the prompt.
+                ctx.register_skill(child.name, child / "SKILL.md", description=meta.get("description", ""), frontmatter=meta)
     if hasattr(ctx, "register_cli_command"):
         from . import cli
         cli.register(ctx)

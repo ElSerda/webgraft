@@ -1,7 +1,7 @@
 ---
-name: web-research
+name: webgraft
 description: "Answer web questions from opened pages, not snippets."
-version: 1.2.0
+version: 1.3.0
 author: ElSerda
 license: MIT
 platforms: [linux, macos, windows]

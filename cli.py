@@ -402,7 +402,8 @@ def step_crawl4ai(args, s: dict, interactive: bool) -> None:
     ok("Crawl4AI installed")
 
 
-SKILL = "webgraft:web-research"
+SKILL = "webgraft:webgraft"
+OLD_SKILLS = ("webgraft:web-research",)  # names of earlier versions, dropped from skills.auto_load
 
 
 OCR_WARMUP = "from rapidocr import RapidOCR; RapidOCR(); print('models ready')"
@@ -442,6 +443,7 @@ def step_skill(args, interactive: bool) -> None:
     current = ((_config().get("skills") or {}).get("auto_load")) or []
     if not isinstance(current, list):
         current = []
+    current = [name for name in current if name not in OLD_SKILLS]
     if SKILL in current:
         ok("Research skill already auto-loaded")
         return
@@ -509,8 +511,8 @@ def uninstall(interactive: bool) -> int:
             unset_config_value(key)  # set by hand: webgraft will be gone, so do not leave it pointing there
             ok(f"{key} cleared (it pointed at webgraft)")
     auto = _config_value("skills.auto_load")
-    if isinstance(auto, list) and SKILL in auto:
-        set_config_value("skills.auto_load", json.dumps([name for name in auto if name != SKILL]))
+    if isinstance(auto, list) and any(name in auto for name in (SKILL, *OLD_SKILLS)):
+        set_config_value("skills.auto_load", json.dumps([name for name in auto if name != SKILL and name not in OLD_SKILLS]))
     try:
         from hermes_constants import get_hermes_home
         env_dir = get_hermes_home() / "environments" / extract.CRAWL4AI_ENV

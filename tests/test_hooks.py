@@ -230,3 +230,21 @@ def test_an_empty_search_gets_a_note_and_a_search_with_results_does_not():
     assert hook(tool_name="web_search", result=SEARCH, session_id="s1") is None
     assert hook(tool_name="web_search", result=json.dumps({"success": False, "error": "SearXNG unreachable"}), session_id="s1") is None
     assert hook(tool_name="web_extract", result=extract_result(PAGE), session_id="s1") is None
+
+
+def test_the_skill_is_registered_under_the_plugin_name_with_its_description():
+    class Ctx(FakeCtx):
+        def __init__(self):
+            super().__init__()
+            self.skills = []
+
+        def register_skill(self, name, path, description="", frontmatter=None):
+            self.skills.append((name, Path(path), description, frontmatter or {}))
+
+    ctx = Ctx()
+    gw.register(ctx)
+    assert [name for name, *_ in ctx.skills] == ["webgraft"]  # webgraft:webgraft, no bare or generic name
+    name, path, description, frontmatter = ctx.skills[0]
+    assert path.name == "SKILL.md" and path.parent.name == "webgraft"
+    assert description == "Answer web questions from opened pages, not snippets."
+    assert frontmatter["name"] == "webgraft" and frontmatter["version"] == "1.3.0"

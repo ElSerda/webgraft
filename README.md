@@ -179,7 +179,7 @@ Then `setup`:
 2. sets `web.extract_backend: webgraft`, and installs Hermes's document converter (`doc-extract`) if missing;
 3. offers **Crawl4AI**, which is optional;
 4. offers **local OCR** for scanned PDFs (RapidOCR), which is optional;
-5. offers to auto-load the bundled skill `webgraft:web-research` (it tells the model to open pages instead of answering from snippets, one URL per call; about 600 tokens per session);
+5. offers to auto-load the bundled skill `webgraft:webgraft` (it tells the model to open pages instead of answering from snippets, one URL per call; about 600 tokens per session);
 6. tests one real page and one missing page.
 
 Non-interactive: `hermes webgraft setup --yes --search ddgs --crawl4ai --ocr --skill`.
@@ -251,7 +251,7 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
 
 - **CLI:** `hermes webgraft status|setup|uninstall`.
 
-- **Skill:** `webgraft:web-research`, read-only, loaded only if you auto-load it or call it.
+- **Skill:** `webgraft:webgraft`, read-only, loaded only if you auto-load it or call it.
 
 - **Network:** downloads the URLs the agent asks `web_extract` to read, directly from this machine with a desktop browser user agent, and, with `llms_txt` on, each site's `/llms.txt` once per hour (plus the `.md` version of a page it lists).
   - `setup` also checks the SearXNG URL you give it and reads two test pages on iana.org; with OCR chosen, RapidOCR downloads its models once from modelscope.cn (SHA-256 checked).
