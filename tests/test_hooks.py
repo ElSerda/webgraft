@@ -232,6 +232,30 @@ def test_an_empty_search_gets_a_note_and_a_search_with_results_does_not():
     assert hook(tool_name="web_extract", result=extract_result(PAGE), session_id="s1") is None
 
 
+def test_an_extract_that_read_no_page_tells_the_model_to_open_the_next_result():
+    ctx = setup()
+    hook = ctx.hooks["transform_tool_result"]
+    failed = json.dumps({"results": [{"url": "https://walled.example/item", "title": "", "content": "",
+                                      "error": "HTTP 403 from origin"}]})
+    note = json.loads(hook(tool_name="web_extract", result=failed, session_id="s1"))["webgraft_note"]
+    assert "could not be read" in note and "open the next" in note and "snippets are not sources" in note
+    # a page that was read, an empty result and a provider error get nothing
+    assert hook(tool_name="web_extract", result=extract_result(PAGE), session_id="s1") is None
+    assert hook(tool_name="web_extract", result=json.dumps({"results": []}), session_id="s1") is None
+    assert hook(tool_name="web_extract", result=json.dumps({"success": False, "error": "No web extract provider configured"}),
+                session_id="s1") is None
+
+
+def test_a_failed_first_url_keeps_the_list_of_urls_left_out():
+    ctx = setup()
+    urls = ["https://walled.example/1", "https://b.example/2"]
+    ctx.hooks["pre_tool_call"](tool_name="web_extract", session_id="s1", tool_call_id="c1", args={"urls": urls})
+    failed = json.dumps({"results": [{"url": urls[0], "content": "", "error": "HTTP 403 from origin"}]})
+    note = json.loads(ctx.hooks["transform_tool_result"](tool_name="web_extract", result=failed,
+                                                         session_id="s1", tool_call_id="c1"))["webgraft_note"]
+    assert "Not opened: https://b.example/2" in note and "could not be read" in note
+
+
 def test_the_skill_is_registered_under_the_plugin_name_with_its_description():
     class Ctx(FakeCtx):
         def __init__(self):

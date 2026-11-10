@@ -5,7 +5,8 @@ Hooks only, no extra model call:
   pre_tool_call         keeps only the first URL of a web_extract call that asks for several (one
                         URL per call keeps each page within a small model's context), and notes
                         the question so a long page has its relevant passages first (focus.py)
-  transform_tool_result adds to that result the URLs that were left out, so the model can open them
+  transform_tool_result adds to that result the URLs that were left out, so the model can open them,
+                        and tells the model to open the next result when no page could be read
   post_tool_call        keeps the text of every page web_extract returned, for the whole session
   transform_llm_output  appends the opened pages to the answer (append-only,
                         so a streamed answer is not reprinted)
@@ -217,19 +218,30 @@ EMPTY_SEARCH_NOTE = ("This search returned no result. A self-hosted search backe
                      "the engines behind it rate-limit it, which several searches sent at once trigger. "
                      "An empty search does not show that something does not exist: search again with one "
                      "query at a time and other words, or open a page that lists it.")
+# Said in the failed result itself: a small model given only the error tends to answer from the
+# search snippets it already holds, although the skill tells it to open the next result.
+UNREAD_NOTE = ("This page could not be read (see its error). Search snippets are not sources: open the next "
+               "relevant search result with web_extract, one URL per call, before answering. One failure "
+               "never ends the research. If the user asked for this page itself, say that it could not be read.")
 
 
 def _annotate(tool_name: str = "", result: Any = None, session_id: str = "", tool_call_id: Any = None,
               **_: Any) -> Optional[str]:
-    """Adds a webgraft_note to two tool results: a web_extract call whose other URLs _guard_tool
-    left out (they are listed), and a web_search that found nothing (an empty result is not an absence)."""
+    """Adds a webgraft_note to three tool results: a web_extract call whose other URLs _guard_tool
+    left out (they are listed), a web_extract call that read no page (open the next result), and a
+    web_search that found nothing (an empty result is not an absence)."""
     if tool_name == "web_extract":
         with _lock:
             held = _held.pop(_call_key(session_id, tool_call_id), None)
-        if not held:
+        notes = []
+        if held:
+            notes.append("webgraft reads one URL per web_extract call, so each page fits in the context. "
+                         "This call read only the first URL. Not opened: " + ", ".join(held))
+        if _nothing_read(result):
+            notes.append(UNREAD_NOTE)
+        if not notes:
             return None
-        note = ("webgraft reads one URL per web_extract call, so each page fits in the context. "
-                "This call read only the first URL. Not opened: " + ", ".join(held))
+        note = " ".join(notes)
     elif tool_name == "web_search":
         data = _json(result)
         if not isinstance(data, dict) or not data.get("success"):
@@ -247,6 +259,15 @@ def _annotate(tool_name: str = "", result: Any = None, session_id: str = "", too
         return f"{result}\n\n[{note}]"
     data["webgraft_note"] = note
     return json.dumps(data, ensure_ascii=False)
+
+
+def _nothing_read(result: Any) -> bool:
+    """True when every page of a web_extract result came back with an error and no text."""
+    data = _json(result)
+    pages = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(pages, list) or not pages:
+        return False
+    return all(isinstance(p, dict) and p.get("error") and not str(p.get("content") or "").strip() for p in pages)
 
 
 def _json(result: Any) -> Any:
