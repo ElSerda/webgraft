@@ -14,6 +14,7 @@ Order for one URL:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -554,7 +555,17 @@ async def vet_view(view: dict) -> dict:
 # ---------------------------------------------------------------- one URL
 
 
+# Status of the last response this task received, redirects included (see _note_status): when the
+# SSRF guard refuses a redirect hop, it says which answer of the site led there.
+_last_status: contextvars.ContextVar[int] = contextvars.ContextVar("webgraft_last_status", default=0)
+
+
+async def _note_status(response) -> None:  # httpx response hook, runs in the reading task
+    _last_status.set(response.status_code)
+
+
 async def _download(client, url: str):
+    _last_status.set(0)
     async with client.stream("GET", url) as response:
         chunks, size = [], 0
         limit = MAX_DOC_BYTES
@@ -628,13 +639,22 @@ async def _read_page(client, url: str, slots: asyncio.Semaphore | None = None) -
 BLOCKED_ADDRESS = "Blocked: URL targets a private or internal network address"  # Hermes's wording
 
 
+def _blocked_redirect(status: int) -> str:
+    """The error for a page whose redirect leads to a private address. In Hermes's origin wording
+    when the redirect's status is known: the site itself sent the agent there, so Hermes must not
+    hand the URL to its keyless rescue, an outside service that would fetch it again."""
+    if 300 <= status < 400:
+        return _origin(status, "redirects to a private or internal network address (blocked)")
+    return BLOCKED_ADDRESS
+
+
 async def _read_page_itself(client, url: str, slots: asyncio.Semaphore | None = None) -> Page:
     try:
         response, body, too_big = await _download(client, url)
         status, ctype = response.status_code, response.headers.get("content-type", "").lower()
     except Exception as exc:  # noqa: BLE001 - network errors become the page's error
         if ssrf_blocked(exc):  # a redirect led to a private address: no browser either
-            return Page(url, error=BLOCKED_ADDRESS)
+            return Page(url, error=_blocked_redirect(_last_status.get()))
         status, ctype, body, too_big, response = 0, "", b"", False, None
         fetch_error = f"could not download: {exc.__class__.__name__}: {exc}"[:300]
     else:
@@ -696,7 +716,8 @@ async def _read_page_itself(client, url: str, slots: asyncio.Semaphore | None = 
 
 async def read_pages(urls: list[str]) -> list[Page]:
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.8,fr;q=0.6"}
-    async with http_client(follow_redirects=True, timeout=FETCH_TIMEOUT, headers=headers) as client:
+    async with http_client(follow_redirects=True, timeout=FETCH_TIMEOUT, headers=headers,
+                           event_hooks={"response": [_note_status]}) as client:
         slots = asyncio.Semaphore(BROWSERS_AT_ONCE)
         return list(await asyncio.gather(*(read_page(client, u, slots) for u in urls)))
 

@@ -101,6 +101,7 @@ def test_a_redirect_to_a_private_address_is_blocked_and_never_reaches_the_browse
         pass
 
     async def download(client, url):
+        await ex._note_status(types.SimpleNamespace(status_code=302))  # the hook, on the redirect
         try:
             raise SSRFConnectionBlocked("169.254.169.254 is a cloud metadata address")
         except SSRFConnectionBlocked as inner:
@@ -108,8 +109,14 @@ def test_a_redirect_to_a_private_address_is_blocked_and_never_reaches_the_browse
     monkeypatch.setattr(ex, "_download", download)
     monkeypatch.setattr(ex, "browser_view", _no_browser(calls))
     page = asyncio.run(ex._read_page_itself(None, "https://redirector.example/"))
-    assert page.error == ex.BLOCKED_ADDRESS
+    # Hermes's origin wording: the site sent us there, so no keyless rescue through an outside service
+    assert page.error == "HTTP 302 from origin: redirects to a private or internal network address (blocked)"
     assert calls == []
+
+
+def test_a_blocked_fetch_without_a_redirect_uses_hermes_blocked_wording():
+    assert ex._blocked_redirect(0) == ex.BLOCKED_ADDRESS
+    assert ex._blocked_redirect(307).startswith("HTTP 307 from origin: ")
 
 
 def test_the_llms_txt_markdown_page_reports_its_own_url():
