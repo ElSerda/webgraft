@@ -82,28 +82,95 @@ _ARTICLE_RE = re.compile(
 )
 @dataclass
 class Page:
-    url: str
+    url: str  # where the content came from (after redirects); the requested URL on an error
     title: str = ""
     content: str = ""
     error: str = ""
     engine: str = ""
     links: str = ""  # "- text: url" lines, see page_links()
+    requested: str = ""  # the URL web_extract asked for, when `url` differs from it
 
     def as_result(self, terms: list[str] | None = None, window: int = 0) -> dict:
         """The provider's dict for this page, cut to MAX_CONTENT_CHARS; with `terms`, a long page
-        has its passages about them first (focus.arrange). The page's links come last."""
+        has its passages about them first (focus.arrange). The page's links come last.
+
+        `url` is the page actually read, so Hermes re-checks a redirect target (SSRF and website
+        policy) as it does for other backends; the requested URL is in metadata.sourceURL."""
         text = self.content
         if terms and not self.error:
             from .focus import arrange
             text = arrange(text, terms, window or 15_000)
         tail = f"\n\n## Links on this page\n{self.links}" if self.links and not self.error else ""
         text = text[:MAX_CONTENT_CHARS - len(tail)] + tail
-        out = {"url": self.url, "title": self.title, "content": text, "raw_content": text,
-               "metadata": {"engine": self.engine} if self.engine else {}}
+        metadata = {"sourceURL": self.requested or self.url}
+        if self.engine:
+            metadata["engine"] = self.engine
+        out = {"url": self.url, "title": self.title, "content": text, "raw_content": text, "metadata": metadata}
         if self.error:
             out["error"] = self.error
             out["content"] = out["raw_content"] = ""
         return out
+
+
+# ---------------------------------------------------------------- network and child safety
+
+
+# What a child process (anydoc, OCR, Crawl4AI and its Chromium) gets from Hermes's environment:
+# what a program needs to start, find its home and temp folders, speak the locale and use a proxy.
+# Never the rest: Hermes's environment holds every provider's API key.
+CHILD_ENV_KEYS = (
+    "PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "TMP", "TEMP", "TMPDIR",
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+    "LANG", "LANGUAGE", "TZ", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR",
+)
+
+
+def child_env(**extra: str) -> dict[str, str]:
+    """A minimal environment for a child process: CHILD_ENV_KEYS and the locale (LC_*) from ours,
+    PYTHONIOENCODING, and the variables this child needs (`extra`)."""
+    env = {k: v for k, v in os.environ.items() if k in CHILD_ENV_KEYS or k.startswith("LC_")}
+    if os.name == "nt":  # Windows keys are case-insensitive: Path, SystemRoot...
+        wanted = {k.upper() for k in CHILD_ENV_KEYS}
+        env.update({k: v for k, v in os.environ.items() if k.upper() in wanted})
+    env["PYTHONIOENCODING"] = "utf-8"
+    env.update(extra)
+    return env
+
+
+def http_client(**kwargs):
+    """Hermes's SSRF-safe httpx client: every connection, redirects included, is checked and
+    refused when it would reach a private, loopback, link-local or cloud metadata address.
+    Outside Hermes there is no such client, and pages are not read (fails closed)."""
+    try:
+        from tools.url_safety import create_ssrf_safe_async_client
+    except ImportError as exc:
+        raise RuntimeError("Hermes's tools.url_safety is required to read pages") from exc
+    return create_ssrf_safe_async_client(**kwargs)
+
+
+async def url_is_safe(url: str) -> bool:
+    """Hermes's SSRF check for a URL (DNS resolved, every answer checked). False outside Hermes."""
+    try:
+        from tools.url_safety import is_safe_url
+    except ImportError:
+        return False
+    try:
+        return await asyncio.to_thread(is_safe_url, url)
+    except Exception:  # noqa: BLE001 - fail closed
+        return False
+
+
+def ssrf_blocked(exc: BaseException) -> bool:
+    """True when a download was refused by the SSRF guard (a hop reached a private address),
+    whether the guard's exception arrives as is or wrapped by httpx."""
+    seen = 0
+    while exc is not None and seen < 5:
+        if any(cls.__name__ == "SSRFConnectionBlocked" for cls in type(exc).__mro__):
+            return True
+        exc, seen = exc.__cause__ or exc.__context__, seen + 1
+    return False
 
 
 # ---------------------------------------------------------------- pure helpers
@@ -332,8 +399,7 @@ async def document_text_isolated(data: bytes, fmt: str | None = None) -> str:
     kwargs = {} if os.name == "nt" else {"preexec_fn": _limit_memory}
     # Hermes runs a base interpreter and adds its package environment to sys.path at startup, so
     # the child gets the parent's import path explicitly (and no user site-packages: -s).
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p and os.path.isdir(p)),
-           "PYTHONIOENCODING": "utf-8", **DOC_CHILD_ENV}
+    env = child_env(PYTHONPATH=os.pathsep.join(p for p in sys.path if p and os.path.isdir(p)), **DOC_CHILD_ENV)
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-s", str(DOC_READER), str(READ_CHARS), fmt or "",
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -384,7 +450,7 @@ async def ocr_isolated(data: bytes, pages: list[int]) -> str:
     if python is None:
         raise RuntimeError("local OCR is not installed (run `hermes webgraft setup`)")
     wanted = pages[:OCR_MAX_PAGES]
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    env = child_env()
     proc = await asyncio.create_subprocess_exec(
         str(python), "-I", str(OCR_RUNNER), ",".join(str(p) for p in wanted), str(READ_CHARS),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
@@ -451,20 +517,38 @@ async def _browser_view(url: str) -> dict:
     chromium = browser.recorded()
     if chromium is None:
         return {"success": False, "error": "no Chromium recorded: run `hermes webgraft setup`"}
-    env = {**os.environ, "CRAWL4AI_NO_CLOUD_NOTICE": "1", "PYTHONIOENCODING": "utf-8"}
     proc = await asyncio.create_subprocess_exec(
         str(python), "-I", str(RUNNER), url, str(chromium),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env=child_env(CRAWL4AI_NO_CLOUD_NOTICE="1"),
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), BROWSER_TIMEOUT)
     except asyncio.TimeoutError:
         proc.kill()
         return {"success": False, "error": f"browser timed out after {BROWSER_TIMEOUT}s"}
+    except asyncio.CancelledError:
+        proc.kill()
+        raise
     lines = [ln for ln in out.decode("utf-8", "replace").splitlines() if ln.startswith("{")]
     if not lines:
         return {"success": False, "error": (err.decode("utf-8", "replace").strip().splitlines() or ["no output"])[-1][:300]}
-    return json.loads(lines[-1])
+    return await vet_view(json.loads(lines[-1]))
+
+
+async def vet_view(view: dict) -> dict:
+    """The browser view, or a failure when the page it ended on is not a public address.
+
+    Chromium follows redirects and script navigation on its own, outside the SSRF-safe client,
+    so the URL it ended on (crawl4ai_runner reports it) is checked here; a view that does not
+    say where it ended is dropped too."""
+    if not view.get("success"):
+        return view
+    final = str(view.get("final_url") or "")
+    if not final or not await url_is_safe(final):
+        logger.info("webgraft: dropped a browser view that ended on an unsafe URL")
+        return {"success": False, "error": "the browser ended on a private or internal address"}
+    return view
 
 
 # ---------------------------------------------------------------- one URL
@@ -520,7 +604,8 @@ async def _from_llms_txt(client, url: str) -> tuple[Page | None, str]:
     if not text:
         return None, llms_url
     title = site_rules.title_of(text) or url.rstrip("/").rsplit("/", 1)[-1]
-    return Page(url, title, text[:READ_CHARS], engine="llms.txt"), llms_url
+    final = str(getattr(response, "url", "") or md_url)
+    return Page(final, title, text[:READ_CHARS], engine="llms.txt", requested=url), llms_url
 
 
 def _optout(status: int, headers: dict, html: str = "") -> str:
@@ -540,48 +625,52 @@ async def _read_page(client, url: str, slots: asyncio.Semaphore | None = None) -
     return page
 
 
+BLOCKED_ADDRESS = "Blocked: URL targets a private or internal network address"  # Hermes's wording
+
+
 async def _read_page_itself(client, url: str, slots: asyncio.Semaphore | None = None) -> Page:
-    browser = None if is_document(url, "", b"") else asyncio.create_task(browser_view(url, slots))
     try:
         response, body, too_big = await _download(client, url)
         status, ctype = response.status_code, response.headers.get("content-type", "").lower()
     except Exception as exc:  # noqa: BLE001 - network errors become the page's error
-        status, ctype, body, too_big = 0, "", b"", False
+        if ssrf_blocked(exc):  # a redirect led to a private address: no browser either
+            return Page(url, error=BLOCKED_ADDRESS)
+        status, ctype, body, too_big, response = 0, "", b"", False, None
         fetch_error = f"could not download: {exc.__class__.__name__}: {exc}"[:300]
     else:
         fetch_error = f"HTTP {status} from origin" if status >= 400 else ""  # Hermes wording: no keyless rescue
+    # Where the download ended, after redirects the SSRF-safe client checked hop by hop.
+    final = str(getattr(response, "url", "") or url) if response is not None else url
 
     if not fetch_error and (opted_out := _optout(status, dict(response.headers))):
-        if browser:
-            browser.cancel()
         return Page(url, error=opted_out)
 
-    if not fetch_error and is_document(url, ctype, body):
-        if browser:
-            browser.cancel()
+    if not fetch_error and is_document(final, ctype, body):
         if too_big:
             return Page(url, error=_origin(status, f"document larger than {MAX_DOC_BYTES // 2**20} MB"))
-        name = url.rstrip("/").rsplit("/", 1)[-1]
+        name = final.rstrip("/").rsplit("/", 1)[-1]
         try:
-            text = await document_text_isolated(body, document_format(url, ctype, body)[1])
+            text = await document_text_isolated(body, document_format(final, ctype, body)[1])
         except NeedsOcr as scanned:
             try:
-                return Page(url, name, await ocr_isolated(body, scanned.pages), engine="anydoc+ocr")
+                return Page(final, name, await ocr_isolated(body, scanned.pages), engine="anydoc+ocr", requested=url)
             except Exception as exc:  # noqa: BLE001
                 return Page(url, error=_origin(status, f"{scanned}; {exc}"))
         except Exception as exc:  # noqa: BLE001
             return Page(url, error=_origin(status, f"unreadable document: {exc}"))
-        return Page(url, name, text, engine="anydoc")
+        return Page(final, name, text, engine="anydoc", requested=url)
 
     title, main, html, headers = "", "", "", {}
     if not fetch_error:
         html = body[:MAX_HTML_BYTES].decode(response.encoding or "utf-8", "replace")
         headers = dict(response.headers)
         if opted_out := _optout(status, headers, html):
-            if browser:
-                browser.cancel()
             return Page(url, error=opted_out)
-        title, main = await asyncio.to_thread(html_text, html, url)
+    # The browser starts once the download is done, on the address it reached: a URL whose
+    # download was refused never reaches Chromium.
+    browser = None if is_document(final, ctype, b"") else asyncio.create_task(browser_view(final, slots))
+    if not fetch_error:
+        title, main = await asyncio.to_thread(html_text, html, final)
 
     view = await browser if browser else {"success": False}
     view_ok = view.get("success") and int(view.get("status") or 200) < 400
@@ -599,14 +688,15 @@ async def _read_page_itself(client, url: str, slots: asyncio.Semaphore | None = 
     title = title or view_title
     if not content.strip():
         return Page(url, title, error=_origin(status, blocked or "no readable text on the page"))
-    return Page(url, title, content, engine=engine, links=page_links(html, browser_md, url, content))
+    if engine == "crawl4ai" and view.get("final_url"):
+        final = str(view["final_url"])  # all the text is the browser's: name the page it read
+    return Page(final, title, content, engine=engine, links=page_links(html, browser_md, final, content),
+                requested=url)
 
 
 async def read_pages(urls: list[str]) -> list[Page]:
-    import httpx
-
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.8,fr;q=0.6"}
-    async with httpx.AsyncClient(follow_redirects=True, timeout=FETCH_TIMEOUT, headers=headers) as client:
+    async with http_client(follow_redirects=True, timeout=FETCH_TIMEOUT, headers=headers) as client:
         slots = asyncio.Semaphore(BROWSERS_AT_ONCE)
         return list(await asyncio.gather(*(read_page(client, u, slots) for u in urls)))
 

@@ -11,21 +11,55 @@ Plugins installed with pip, which have no manifest on disk, are not seen.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Callable
 
 HOOK = "transform_llm_output"
+_KEYS = ("name", "provides_hooks", "hooks")
+_TOP_KEY = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*(.*)$")
+
+
+def _scalar(text: str) -> str:
+    text = re.sub(r"\s+#.*$", "", text).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1]
+    return text.strip()
+
+
+def read_manifest(text: str) -> dict:
+    """The few top-level keys webgraft needs from a plugin.yaml (name, provides_hooks, hooks), read
+    without a YAML library (Hermes does not ship PyYAML). Lists may be flow ([a, b]) or block
+    (- a); anything else in the file is ignored."""
+    data: dict = {}
+    current = None
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            current = None
+            m = _TOP_KEY.match(line)
+            if not m or m.group(1) not in _KEYS:
+                continue
+            key, value = m.group(1), _scalar(m.group(2))
+            if key == "name":
+                data[key] = value
+            elif value.startswith("[") and value.endswith("]"):
+                data[key] = [_scalar(v) for v in value[1:-1].split(",") if _scalar(v)]
+            elif not value:
+                data[key], current = [], key
+        elif current and line.lstrip().startswith("- "):
+            data[current].append(_scalar(line.lstrip()[2:]))
+    return data
 
 
 def _manifests(root: Path):
     for path in list(root.glob("*/plugin.yaml")) + list(root.glob("*/*/plugin.yaml")):
         try:
-            import yaml
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except Exception:  # noqa: BLE001 - a broken manifest is that plugin's problem
+            yield read_manifest(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - an unreadable manifest is that plugin's problem
             continue
-        if isinstance(data, dict):
-            yield data
 
 
 def other_reply_rewriters(own_name: str, has_plugin: Callable[[str], bool] | None) -> list[str]:

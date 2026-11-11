@@ -257,10 +257,16 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
   - `setup` also checks the SearXNG URL you give it and reads two test pages on iana.org; with OCR chosen, RapidOCR downloads its models once from modelscope.cn (SHA-256 checked).
   - Crawl4AI's browser loads the same URLs and their page assets.
 
+- **Private addresses:**
+  - pages, `/llms.txt` and `.md` versions are fetched with Hermes's SSRF-safe client (`tools.url_safety`), which refuses private, loopback, link-local and cloud metadata addresses on every redirect hop;
+  - a result names the page actually read in `url` (the requested URL is in `metadata.sourceURL`), so Hermes re-checks a redirect target against its SSRF and website policies;
+  - the browser starts only after that download, on the address it reached, and its view is dropped when the page it ended on (after its own redirects and script navigation) is not a public address.
+
 - **Processes:**
   - one Crawl4AI child process per page, at most three at once, each stopped after 60 seconds; it starts Hermes's Chromium headless (DevTools port on 127.0.0.1, temporary profile) and stops it before exiting;
   - one child process per document (Hermes's own Python running `doc_reader.py` with anydoc), stopped after 60 seconds;
   - for a scanned PDF with OCR installed, one more child process (`ocr_runner.py` in the OCR environment), stopped after 180 seconds.
+  - Children get a minimal environment (path, home and temp folders, locale, proxy settings, and what each one needs), never Hermes's API keys.
 
 - **Writes:**
   - `web.search_backend`, `web.extract_backend`, `skills.auto_load` and, for SearXNG, `SEARXNG_URL` in `.env`, all through Hermes's own config functions and only during `setup` and `uninstall`;
@@ -270,7 +276,7 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
   Nothing else is stored: page text lives in memory only, for at most 30 pages per conversation and 20 conversations, and so do the last user message and search queries of each conversation (for `focus`) and which sites publish an `llms.txt` (for an hour); all of it is gone when Hermes stops.
 
 - **Reads:**
-  - the `plugin.yaml` of other installed plugins, to find reply rewriters;
+  - the `plugin.yaml` of other installed plugins (`name` and `provides_hooks` only, no YAML library needed), to find reply rewriters;
   - `web.extract_char_limit` and `display.language` in `config.yaml`;
   - `hermes pm env chromium` and `browser.executable_path`, during `setup`, to find Hermes's Chromium.
 
@@ -298,6 +304,7 @@ With `show_sources: auto` it then adds nothing and leaves the reply to that plug
 - Pages behind logins or strong bot protection cannot be read; they come back as errors.
 
 - Hermes refuses private and internal addresses (127.0.0.1, 10.x, 192.168.x, link-local) before any extraction backend runs: an agent reading untrusted pages must not be able to reach your network.
+  - webgraft applies the same rule to redirects and to the browser (see "Private addresses" above).
   - The result is "Blocked: URL targets a private or internal network address".
   - To read pages on your own LAN, set `security.allow_private_urls: true` in Hermes's `config.yaml`; cloud metadata addresses stay blocked.
 

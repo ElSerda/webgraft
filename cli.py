@@ -429,7 +429,8 @@ def step_ocr(args, s: dict, interactive: bool) -> None:
     info("Preparing the environment (a few minutes the first time)...")
     python = ensure_environment(extract.OCR_ENV, extract.OCR_REQUIREMENTS, explicit=True)
     info("Downloading the OCR models...")
-    done = subprocess.run([str(python), "-I", "-c", OCR_WARMUP], capture_output=True, text=True)
+    done = subprocess.run([str(python), "-I", "-c", OCR_WARMUP], capture_output=True, text=True,
+                          env=extract.child_env())
     if done.returncode == 0:
         ok("OCR installed")
     else:

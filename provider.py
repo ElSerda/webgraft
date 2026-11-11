@@ -52,4 +52,4 @@ class WebGraftProvider(WebSearchProvider):
             error = f"webgraft could not read the pages: {exc}"[:300]
             return [{"url": u, "title": "", "content": "", "error": error} for u in urls]
         from .focus import take
-        return [p.as_result(*(take(p.url) or (None, 0))) for p in pages]
+        return [p.as_result(*(take(p.requested or p.url) or (None, 0))) for p in pages]

@@ -5,7 +5,7 @@
 Crawl4AI drives the Chromium Hermes already installs (`hermes pm install chromium`), started here
 headless with a DevTools port and connected over CDP, so the plugin downloads no browser of its own.
 Kept out of Hermes's environment because Crawl4AI pulls about 35 packages.
-Output: {"success", "status", "title", "markdown", "error"}; markdown is Crawl4AI's pruned
+Output: {"success", "status", "title", "final_url", "markdown", "error"}; markdown is Crawl4AI's pruned
 ("fit") markdown, falling back to the full markdown when pruning leaves almost nothing.
 """
 
@@ -84,7 +84,11 @@ async def crawl(url: str, ws_url: str) -> dict:
     fit = (md.fit_markdown or "") if md else ""
     full = (md.raw_markdown or "") if md else ""
     title = ((r.metadata or {}).get("title") or "") if isinstance(r.metadata, dict) else ""
-    return {"success": True, "status": r.status_code, "title": title, "markdown": fit if len(fit) > 200 else full}
+    # Where the browser ended, after redirects and script navigation: the plugin checks it before
+    # using the text (Chromium does not go through Hermes's SSRF-safe client).
+    final = getattr(r, "redirected_url", None) or getattr(r, "url", None) or url
+    return {"success": True, "status": r.status_code, "title": title, "final_url": str(final),
+            "markdown": fit if len(fit) > 200 else full}
 
 
 def main(url: str, executable: str) -> dict:
