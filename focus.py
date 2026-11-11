@@ -176,8 +176,9 @@ def arrange(text: str, terms: list[str], window: int = DEFAULT_WINDOW) -> str:
             budget -= size_needed
     if not chosen or min(chosen) == 0 and chosen == set(range(len(chosen))):
         return text  # the passages were already at the top
-    shown = ", ".join(t for t in terms if any(t in rest[i].lower() for i in chosen)) or ", ".join(terms[:4])
-    note = (f"[webgraft: this page is long. Passages that mention {shown} come first; "
+    # The note does not name the terms: Hermes caches the page for every session for a while, and
+    # the words of one user's question must not show up in another user's result.
+    note = ("[webgraft: this page is long. The passages about the question come first; "
             "the rest of the page follows in its original order. Nothing was removed.]")
     # Best match first; passages next to each other in the page stay together and in order.
     order: list[int] = []
@@ -191,11 +192,14 @@ def arrange(text: str, terms: list[str], window: int = DEFAULT_WINDOW) -> str:
     return "\n\n".join(parts)
 
 
-RECENT_SECONDS = 120
-_recent: tuple[list[str], int, float] | None = None
-
-
 def _key(url: str) -> str:
+    """The URL as Hermes passes it to the provider (normalize_url_for_request: IDNA host,
+    percent-encoded path), then without fragment, trailing slash or case in scheme and host."""
+    try:
+        from tools.url_safety import normalize_url_for_request
+        url = normalize_url_for_request(url or "")
+    except Exception:  # noqa: BLE001 - outside Hermes
+        pass
     url = (url or "").split("#")[0].strip()
     scheme, sep, rest = url.partition("://")
     host, slash, path = rest.partition("/")
@@ -214,24 +218,17 @@ def hermes_window() -> int:
 
 def expect(url: str, terms: list[str], window: int) -> None:
     """Remember what the next read of `url` is for (set by the pre_tool_call hook)."""
-    global _recent
     if not url or not terms:
         return
-    import time
     with _lock:
         _pending[_key(url)] = (terms, window)
         _pending.move_to_end(_key(url))
         while len(_pending) > MAX_REMEMBERED:
             _pending.popitem(last=False)
-        _recent = (terms, window, time.monotonic())
 
 
 def take(url: str) -> tuple[list[str], int] | None:
-    """What a read of `url` is for. If Hermes rewrote the URL on the way (redirect, normalization),
-    the question of the call made in the last two minutes is used."""
-    import time
+    """What a read of `url` is for, or None: the page is then only cut, never arranged for the
+    question of another call (another session may be reading at the same time)."""
     with _lock:
-        plan = _pending.pop(_key(url), None)
-        if plan is None and _recent is not None and time.monotonic() - _recent[2] < RECENT_SECONDS:
-            plan = (_recent[0], _recent[1])
-        return plan
+        return _pending.pop(_key(url), None)

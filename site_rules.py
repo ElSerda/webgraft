@@ -25,7 +25,9 @@ LLMS_TIMEOUT = 8
 MAX_SITES = 200
 
 BOM = chr(0xFEFF)  # byte order mark that some editors put at the start of a text file
-_LINK = re.compile(r"\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+# Bounded repeats: an llms.txt (up to 2 MB) or a page head with an unclosed "[" or "<meta" must not
+# make every later match attempt re-read the rest of the file.
+_LINK = re.compile(r"\[[^\]]{0,500}\]\(\s{0,20}<?([^)\s>]{1,2000})>?(?:\s{1,20}\"[^\"]{0,500}\")?\s{0,20}\)")
 _lock = threading.Lock()
 _sites: "OrderedDict[str, tuple[float, frozenset[str] | None]]" = OrderedDict()
 
@@ -33,7 +35,7 @@ _sites: "OrderedDict[str, tuple[float, frozenset[str] | None]]" = OrderedDict()
 # ---------------------------------------------------------------- opt-outs
 
 
-_META = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_META = re.compile(r"<meta\b[^>]{0,2000}>", re.IGNORECASE)
 _ATTR = re.compile(r"""(\w[\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
 
 
@@ -79,6 +81,25 @@ def parse_llms_txt(text: str, base: str) -> frozenset[str] | None:
     return frozenset(urljoin(base + "/", m.group(1)) for m in _LINK.finditer(body))
 
 
+async def get_capped(client, url: str, limit: int, timeout: float | None = None):
+    """(response, body) for a GET, read as a stream and stopped past `limit` bytes; body is None
+    when the file is larger. httpx's timeouts apply per read, so a server that keeps sending
+    would otherwise fill the memory before the size is known."""
+    kwargs = {"timeout": timeout} if timeout else {}
+    async with client.stream("GET", url, **kwargs) as response:
+        chunks, size = [], 0
+        async for chunk in response.aiter_bytes():
+            size += len(chunk)
+            if size > limit:
+                return response, None
+            chunks.append(chunk)
+        return response, b"".join(chunks)
+
+
+def decoded(response, body: bytes) -> str:
+    return body.decode(getattr(response, "encoding", None) or "utf-8", "replace")
+
+
 async def llms_index(client, url: str) -> tuple[str, frozenset[str]] | None:
     """(llms.txt URL, the URLs it lists) for the page's site, or None. Fetched once per hour per site."""
     origin = _origin(url)
@@ -91,10 +112,10 @@ async def llms_index(client, url: str) -> tuple[str, frozenset[str]] | None:
         return (f"{origin}/llms.txt", cached[1]) if cached[1] is not None else None
     links = None
     try:
-        response = await client.get(f"{origin}/llms.txt", timeout=LLMS_TIMEOUT)
+        response, body = await get_capped(client, f"{origin}/llms.txt", LLMS_MAX_BYTES, LLMS_TIMEOUT)
         ctype = response.headers.get("content-type", "").lower()
-        if response.status_code == 200 and "html" not in ctype and len(response.content) <= LLMS_MAX_BYTES:
-            links = parse_llms_txt(response.text, origin)
+        if response.status_code == 200 and "html" not in ctype and body is not None:
+            links = parse_llms_txt(decoded(response, body), origin)
     except Exception:  # noqa: BLE001 - no index is the normal case
         links = None
     with _lock:

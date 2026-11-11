@@ -119,21 +119,70 @@ def test_a_blocked_fetch_without_a_redirect_uses_hermes_blocked_wording():
     assert ex._blocked_redirect(307).startswith("HTTP 307 from origin: ")
 
 
-def test_the_llms_txt_markdown_page_reports_its_own_url():
-    class Md:
-        status_code, headers, text = 200, {"content-type": "text/markdown"}, "# Specs\n\n16 GB"
-        url = "https://docs.example/specs.md"
+class StreamResponse:
+    def __init__(self, url, body, ctype="text/plain", headers=None, chunks=1):
+        self.url, self.status_code, self.encoding = url, 200, "utf-8"
+        self.headers = {"content-type": ctype, **(headers or {})}
+        self.body, self.chunks, self.sent = body.encode("utf-8"), chunks, 0
 
-    class Client:
-        async def get(self, url, **_):
-            if url.endswith("/llms.txt"):
-                r = Md()
-                r.text, r.content, r.headers = "# Docs\n- [Specs](/specs.md)", b"x", {"content-type": "text/plain"}
-                return r
-            return Md()
+    async def aiter_bytes(self):
+        for _ in range(self.chunks):
+            self.sent += len(self.body)
+            yield self.body
+
+
+class StreamClient:
+    """Answers stream() from a dict of URL -> StreamResponse."""
+    def __init__(self, routes):
+        self.routes = routes
+
+    def stream(self, method, url, **_):
+        response = self.routes[url]
+
+        class Ctx:
+            async def __aenter__(self):
+                return response
+
+            async def __aexit__(self, *exc):
+                return False
+        return Ctx()
+
+
+LLMS = "# Docs\n- [Specs](/specs.md)"
+
+
+def _llms_client(md):
     importlib.import_module("webgraft.site_rules")._sites.clear()
-    page, _ = asyncio.run(ex._from_llms_txt(Client(), "https://docs.example/specs"))
+    return StreamClient({"https://docs.example/llms.txt": StreamResponse("https://docs.example/llms.txt", LLMS),
+                         "https://docs.example/specs.md": md})
+
+
+def test_the_llms_txt_markdown_page_reports_its_own_url():
+    client = _llms_client(StreamResponse("https://docs.example/specs.md", "# Specs\n\n16 GB", "text/markdown"))
+    page, _ = asyncio.run(ex._from_llms_txt(client, "https://docs.example/specs"))
     assert (page.url, page.requested) == ("https://docs.example/specs.md", "https://docs.example/specs")
+
+
+def test_an_endless_markdown_file_is_cut_off_and_the_html_is_read_instead(monkeypatch):
+    monkeypatch.setattr(ex, "MAX_MARKDOWN_BYTES", 1000)
+    endless = StreamResponse("https://docs.example/specs.md", "x" * 100, "text/markdown", chunks=10_000)
+    page, llms_url = asyncio.run(ex._from_llms_txt(_llms_client(endless), "https://docs.example/specs"))
+    assert page is None and llms_url == "https://docs.example/llms.txt"
+    assert endless.sent <= 1100  # stopped right after the cap, not read to the end
+
+
+def test_a_markdown_version_that_opts_out_of_ai_is_an_error():
+    md = StreamResponse("https://docs.example/specs.md", "# Specs", "text/markdown", {"X-Robots-Tag": "noai"})
+    page, _ = asyncio.run(ex._from_llms_txt(_llms_client(md), "https://docs.example/specs"))
+    assert "asks not to be used by AI" in page.error
+
+
+def test_a_huge_llms_txt_is_ignored(monkeypatch):
+    sr = importlib.import_module("webgraft.site_rules")
+    sr._sites.clear()
+    monkeypatch.setattr(sr, "LLMS_MAX_BYTES", 1000)
+    big = StreamResponse("https://docs.example/llms.txt", LLMS + " " * 200, chunks=50)
+    assert asyncio.run(sr.llms_index(StreamClient({"https://docs.example/llms.txt": big}), "https://docs.example/x")) is None
 
 
 # ---------------------------------------------------------------- 2. browser view
@@ -217,3 +266,92 @@ def test_another_enabled_rewriter_is_found(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_constants", constants)
     assert compat.other_reply_rewriters("webgraft", lambda name: True) == ["other"]
     assert compat.other_reply_rewriters("webgraft", lambda name: name != "other") == []
+
+
+# ---------------------------------------------------------------- crafted pages stay fast
+
+
+def _seconds(fn, *args):
+    import time
+    start = time.perf_counter()
+    fn(*args)
+    return time.perf_counter() - start
+
+
+def test_crafted_number_runs_are_indexed_in_linear_time():
+    values = importlib.import_module("webgraft.values")
+    for text in ("123 " * 20_000, "$1 " * 20_000, "12 GB " * 15_000):  # 60-90 KB, one line
+        assert _seconds(values.index_page, "", text) < 2, text[:6]
+
+
+def test_unclosed_tags_and_brackets_stay_fast():
+    for html, md in (('<a href="x">' * 8_000, ""), ("", "[abc" * 20_000), ("<meta " * 15_000, "")):
+        assert _seconds(ex.page_links, html, md, "https://x.example", "abc x") < 2
+        assert _seconds(ex.looks_blocked, "t", "short", {}, html) < 2
+    assert _seconds(ex.strip_links, "[a](b" * 20_000 + " " * 100_000) < 2
+    sr = importlib.import_module("webgraft.site_rules")
+    assert _seconds(sr.parse_llms_txt, "# x\n" + "[a" * 50_000, "https://x.example") < 2
+    assert _seconds(sr.ai_optout, {}, "<meta " * 15_000) < 2
+
+
+def test_a_long_page_note_does_not_name_the_question_words():
+    fo = importlib.import_module("webgraft.focus")
+    blocks = [f"Paragraph {i} about general things and more general things." * 3 for i in range(400)]
+    blocks[300] = "The zyxquant plan costs 200 dollars a month and includes zyxquant support."
+    text = "\n\n".join(blocks)
+    arranged = fo.arrange(text, ["zyxquant"], 15_000)
+    assert arranged != text and "passages about the question come first" in arranged
+    assert "zyxquant" not in arranged.split("come first")[0]
+
+
+def test_a_page_read_without_a_matching_call_is_not_arranged_for_another_question():
+    fo = importlib.import_module("webgraft.focus")
+    fo.expect("https://one.example/a", ["secret"], 9000)
+    assert fo.take("https://other.example/b") is None
+    assert fo.take("https://one.example/a") == (["secret"], 9000)
+
+
+def test_a_dns_failure_is_not_called_a_private_address():
+    class SSRFConnectionBlocked(ValueError):
+        pass
+    assert ex.ssrf_blocked(SSRFConnectionBlocked("Blocked request to private/internal address during connect: x"))
+    assert not ex.ssrf_blocked(SSRFConnectionBlocked("Blocked request - DNS resolution failed for: x"))
+
+
+# ---------------------------------------------------------------- browser child is stopped whole
+
+
+def _alive(pid: int) -> bool:
+    import os
+    import subprocess as sp
+    if os.name == "nt":
+        out = sp.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_a_browser_read_that_times_out_is_stopped_with_its_children(tmp_path, monkeypatch):
+    import time
+    pid_file = tmp_path / "child.pid"
+    runner = tmp_path / "runner.py"
+    runner.write_text(
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n")
+    monkeypatch.setattr(ex, "RUNNER", runner)
+    monkeypatch.setattr(ex, "crawl4ai_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(ex.browser, "recorded", lambda: Path("chromium"))
+    monkeypatch.setattr(ex, "BROWSER_TIMEOUT", 3)
+    view = asyncio.run(ex.browser_view("https://x.example"))
+    assert "timed out" in view["error"]
+    child = int(pid_file.read_text())
+    for _ in range(20):
+        if not _alive(child):
+            break
+        time.sleep(0.25)
+    assert not _alive(child)

@@ -41,6 +41,7 @@ BROWSER_TIMEOUT = 60
 MAX_HTML_BYTES = 15 * 1024 * 1024
 MAX_DOC_BYTES = 50 * 1024 * 1024  # Hermes's own anydoc limit (tools/read_extract.py)
 MAX_CONTENT_CHARS = 30_000  # what one page may hand to the model
+MAX_MARKDOWN_BYTES = 4 * 1024 * 1024  # a page's .md version listed in llms.txt (larger: the HTML is read)
 # What a page is read up to, before focus.arrange() picks what comes first and the cut above.
 READ_CHARS = 400_000
 MAX_COMPLEMENT_CHARS = 8_000
@@ -78,7 +79,7 @@ _WALL_WORDS_RE = re.compile(
 # What the HTML head says about a page: an article (og:type article, a publication date, an
 # <article> element) is content, never a bot wall, whatever its title or text.
 _ARTICLE_RE = re.compile(
-    r"<meta[^>]+(?:property|name)=[\"'](?:og:type[\"'][^>]+content=[\"']article|article:published_time)|<article[\s>]",
+    r"<meta[^>]{1,500}?(?:property|name)=[\"'](?:og:type[\"'][^>]{1,500}?content=[\"']article|article:published_time)|<article[\s>]",
     re.IGNORECASE,
 )
 @dataclass
@@ -164,12 +165,13 @@ async def url_is_safe(url: str) -> bool:
 
 
 def ssrf_blocked(exc: BaseException) -> bool:
-    """True when a download was refused by the SSRF guard (a hop reached a private address),
-    whether the guard's exception arrives as is or wrapped by httpx."""
+    """True when a download was refused by the SSRF guard because a hop reached a private
+    address, whether the guard's exception arrives as is or wrapped by httpx. The guard also
+    raises when DNS fails; that is an ordinary download failure, not a private address."""
     seen = 0
     while exc is not None and seen < 5:
         if any(cls.__name__ == "SSRFConnectionBlocked" for cls in type(exc).__mro__):
-            return True
+            return "DNS" not in str(exc)
         exc, seen = exc.__cause__ or exc.__context__, seen + 1
     return False
 
@@ -202,15 +204,21 @@ def looks_blocked(title: str, text: str, headers: dict | None = None, html: str 
 
 
 def strip_links(markdown: str) -> str:
-    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", markdown)  # images
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)  # links -> their text
-    text = re.sub(r"<https?://[^>]+>", "", text)
-    text = re.sub(r"[ \t]+\n", "\n", text)
+    # Bounded repeats throughout: on page text, an unbounded [^\]]* or [^>]+ re-reads the rest of the
+    # page at every "[" or "<" that is never closed, and a crafted page then takes minutes.
+    text = re.sub(r"!\[[^\]]{0,500}\]\([^)]{0,2000}\)", "", markdown)  # images
+    text = re.sub(r"\[([^\]]{0,500})\]\([^)]{0,2000}\)", r"\1", text)  # links -> their text
+    text = re.sub(r"<https?://[^>\s]{1,2000}>", "", text)
+    text = "\n".join(line.rstrip(" \t") for line in text.split("\n"))
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-_HTML_LINK_RE = re.compile(r"<a\s[^>]*?href\s*=\s*[\"']([^\"'#]+)[^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
-_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)")
+# Bounded repeats, as in strip_links(): an <a> or "[" that is never closed must not make every
+# later match attempt re-read the rest of the page.
+_HTML_LINK_RE = re.compile(r"<a\s[^>]{0,1000}?href\s*=\s*[\"']([^\"'#]{1,2000})[^>]{0,1000}>(.{0,1000}?)</a>",
+                           re.IGNORECASE | re.DOTALL)
+_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]{1,500})\]\(([^)\s]{1,2000})\)")
+LINKS_SCAN_CHARS = 400_000  # of the HTML and of the browser view, searched for links
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -234,7 +242,8 @@ def page_links(html: str, browser_md: str, url: str, content: str) -> str:
     seen_texts: set[str] = set()
     out: list[str] = []
     size = 0
-    found = [(h, t) for h, t in _HTML_LINK_RE.findall(html or "")] + [(h, t) for t, h in _MD_LINK_RE.findall(browser_md or "")]
+    found = [(h, t) for h, t in _HTML_LINK_RE.findall((html or "")[:LINKS_SCAN_CHARS])] + \
+            [(h, t) for t, h in _MD_LINK_RE.findall((browser_md or "")[:LINKS_SCAN_CHARS])]
     for href, raw in found:
         text = re.sub(r"\s+", " ", unescape(_TAG_RE.sub(" ", raw))).strip()
         if len(text) < 3 or not re.search(r"[^\W\d_]", text):
@@ -450,7 +459,8 @@ async def ocr_isolated(data: bytes, pages: list[int]) -> str:
     python = ocr_python()
     if python is None:
         raise RuntimeError("local OCR is not installed (run `hermes webgraft setup`)")
-    wanted = pages[:OCR_MAX_PAGES]
+    # No page list means anydoc found no text layer at all: read from the first page.
+    wanted = pages[:OCR_MAX_PAGES] or list(range(1, OCR_MAX_PAGES + 1))
     env = child_env()
     proc = await asyncio.create_subprocess_exec(
         str(python), "-I", str(OCR_RUNNER), ",".join(str(p) for p in wanted), str(READ_CHARS),
@@ -484,7 +494,7 @@ def html_text(html: str, url: str) -> tuple[str, str]:
     meta = trafilatura.extract_metadata(html, default_url=url)
     title = (meta.title if meta and meta.title else "") or ""
     if not title:
-        m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        m = re.search(r"<title[^>]{0,500}>(.{0,2000}?)</title>", html[:200_000], re.IGNORECASE | re.DOTALL)
         title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
     return title, text
 
@@ -522,19 +532,47 @@ async def _browser_view(url: str) -> dict:
         str(python), "-I", str(RUNNER), url, str(chromium),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         env=child_env(CRAWL4AI_NO_CLOUD_NOTICE="1"),
+        **({} if os.name == "nt" else {"start_new_session": True}),  # its own group, Chromium included
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), BROWSER_TIMEOUT)
     except asyncio.TimeoutError:
-        proc.kill()
+        await _stop_tree(proc)
         return {"success": False, "error": f"browser timed out after {BROWSER_TIMEOUT}s"}
-    except asyncio.CancelledError:
-        proc.kill()
+    except asyncio.CancelledError:  # Hermes's extract timeout, or the turn was interrupted
+        await asyncio.shield(_stop_tree(proc))
         raise
     lines = [ln for ln in out.decode("utf-8", "replace").splitlines() if ln.startswith("{")]
     if not lines:
         return {"success": False, "error": (err.decode("utf-8", "replace").strip().splitlines() or ["no output"])[-1][:300]}
     return await vet_view(json.loads(lines[-1]))
+
+
+async def _stop_tree(proc) -> None:
+    """Stop the runner and the Chromium it started: killing the runner alone leaves Chromium
+    running (on Windows, children outlive their parent)."""
+    if proc.returncode is not None:
+        return
+    try:
+        if os.name == "nt":
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/T", "/F", "/PID", str(proc.pid),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await asyncio.wait_for(killer.wait(), 15)
+        else:
+            import signal
+            os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:  # noqa: BLE001 - fall back to the runner itself
+        pass
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), 10)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def vet_view(view: dict) -> dict:
@@ -607,13 +645,16 @@ async def _from_llms_txt(client, url: str) -> tuple[Page | None, str]:
     if not md_url:
         return None, llms_url
     try:
-        response = await client.get(md_url)
+        response, body = await site_rules.get_capped(client, md_url, MAX_MARKDOWN_BYTES)
     except Exception:  # noqa: BLE001 - fall back to the HTML page
         return None, llms_url
     ctype = response.headers.get("content-type", "").lower()
-    text = response.text.strip() if response.status_code == 200 and "html" not in ctype else ""
+    ok = response.status_code == 200 and "html" not in ctype and body is not None
+    text = site_rules.decoded(response, body).strip() if ok else ""
     if not text:
         return None, llms_url
+    if opted_out := _optout(response.status_code, dict(response.headers)):
+        return Page(url, error=opted_out), llms_url
     title = site_rules.title_of(text) or url.rstrip("/").rsplit("/", 1)[-1]
     final = str(getattr(response, "url", "") or md_url)
     return Page(final, title, text[:READ_CHARS], engine="llms.txt", requested=url), llms_url
@@ -704,14 +745,15 @@ async def _read_page_itself(client, url: str, slots: asyncio.Semaphore | None = 
         main, blocked = "", reason
     if browser_md and (reason := looks_blocked(view_title, strip_links(browser_md), headers, html)):
         browser_md, blocked = "", reason
-    content, engine = merge(main, browser_md)
+    # Off the event loop: on a large page these take a moment, and Hermes's other work must go on.
+    content, engine = await asyncio.to_thread(merge, main, browser_md)
     title = title or view_title
     if not content.strip():
         return Page(url, title, error=_origin(status, blocked or "no readable text on the page"))
     if engine == "crawl4ai" and view.get("final_url"):
         final = str(view["final_url"])  # all the text is the browser's: name the page it read
-    return Page(final, title, content, engine=engine, links=page_links(html, browser_md, final, content),
-                requested=url)
+    links = await asyncio.to_thread(page_links, html, browser_md, final, content)
+    return Page(final, title, content, engine=engine, links=links, requested=url)
 
 
 async def read_pages(urls: list[str]) -> list[Page]:

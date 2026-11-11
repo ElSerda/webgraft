@@ -11,34 +11,51 @@ Output: {"success", "status", "title", "final_url", "markdown", "error"}; markdo
 
 import asyncio
 import json
+import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import warnings
 
 warnings.filterwarnings("ignore")
+# The whole read, Chromium's start included, ends within BUDGET seconds, below the plugin's
+# 60 s cap on this process: the crawl always ends here and this script stops Chromium itself.
+BUDGET = 50
 DEVTOOLS_WAIT = 20
-# Below the plugin's 60 s cap on this process, so the crawl always ends here and Chromium is
-# stopped by this script: killing the script from outside would leave Chromium running on Windows.
-CRAWL_TIMEOUT = 45
 
 
-def start_chromium(executable: str):
-    """Start Chromium headless on a free DevTools port. Returns (process, ws_url, profile_dir)."""
+def start_chromium(executable: str, deadline: float):
+    """Start Chromium headless on a free DevTools port. Returns (process, ws_url, profile_dir).
+
+    Chromium's stderr is read by a thread for the whole run: the DevTools line comes from it, and
+    a pipe nobody reads would fill and stall Chromium."""
     profile = tempfile.mkdtemp(prefix="webgraft-chromium-")
     proc = subprocess.Popen(
         [executable, "--headless=new", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
          f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", "--disable-gpu",
          "--disable-extensions", "--mute-audio", "about:blank"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        errors="replace",
     )
-    deadline = time.monotonic() + DEVTOOLS_WAIT
-    while time.monotonic() < deadline:
-        line = proc.stderr.readline()
-        if not line and proc.poll() is not None:
+    lines: "queue.Queue[str | None]" = queue.Queue()
+
+    def drain():
+        for line in proc.stderr:
+            lines.put(line)
+        lines.put(None)
+    threading.Thread(target=drain, daemon=True).start()
+    until = min(deadline, time.monotonic() + DEVTOOLS_WAIT)
+    while (left := until - time.monotonic()) > 0:
+        try:
+            line = lines.get(timeout=left)
+        except queue.Empty:
+            break
+        if line is None:
             break
         m = re.search(r"DevTools listening on (ws://\S+)", line)
         if m:
@@ -47,8 +64,24 @@ def start_chromium(executable: str):
     raise RuntimeError("Chromium did not open its DevTools port")
 
 
+def kill_tree(proc) -> None:
+    """Stop a process and everything it started (Chromium runs a process per tab, GPU and network).
+    On Windows, children outlive their parent unless killed with it; elsewhere Chromium's helpers
+    exit with the browser, and Chromium stays in this script's process group, which the plugin
+    kills as a whole when it has to stop this script."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15)
+        except Exception:  # noqa: BLE001 - fall back to the process itself
+            pass
+    if proc.poll() is None:
+        proc.kill()
+
+
 def stop_chromium(proc, profile: str) -> None:
-    proc.kill()
+    kill_tree(proc)
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
@@ -92,11 +125,20 @@ async def crawl(url: str, ws_url: str) -> dict:
 
 
 def main(url: str, executable: str) -> dict:
-    proc, ws_url, profile = start_chromium(executable)
+    # Crawl4AI keeps a log of every URL it visits, and its cache database, under
+    # CRAWL4_AI_BASE_DIRECTORY (default: the home folder). A temporary folder per read, removed
+    # below, so nothing of the pages read stays on disk.
+    base = tempfile.mkdtemp(prefix="webgraft-crawl4ai-")
+    os.environ["CRAWL4_AI_BASE_DIRECTORY"] = base
+    deadline = time.monotonic() + BUDGET
     try:
-        return asyncio.run(asyncio.wait_for(crawl(url, ws_url), CRAWL_TIMEOUT))
+        proc, ws_url, profile = start_chromium(executable, deadline)
+        try:
+            return asyncio.run(asyncio.wait_for(crawl(url, ws_url), max(1.0, deadline - time.monotonic())))
+        finally:
+            stop_chromium(proc, profile)
     finally:
-        stop_chromium(proc, profile)
+        shutil.rmtree(base, ignore_errors=True)
 
 
 if __name__ == "__main__":

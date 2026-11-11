@@ -60,7 +60,9 @@ _UNIT_ALT = "|".join(sorted((re.escape(s) for s in UNIT_SPELLINGS), key=len, rev
 _CURRENCIES = {"$": "usd", "usd": "usd", "€": "eur", "eur": "eur", "£": "gbp", "gbp": "gbp"}
 
 # A number: 1 344 / 1,344 / 1.344 / 2.62 / 2,62 / 14080. Spaces include no-break and thin spaces.
-_NUM = r"\d{1,3}(?:[    ,.]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?"
+# At most four groups of thousands (up to 10^15): unbounded, a run like "123 123 123 ..." made every
+# match attempt re-read the rest of the run, and a crafted page took seconds per few kilobytes.
+_NUM = r"\d{1,3}(?:[    ,.]\d{3}){1,4}(?:[.,]\d+)?|\d+(?:[.,]\d+)?"
 _QUANTITY_RE = re.compile(
     rf"(?<![\w.,])({_NUM})\s?({_UNIT_ALT})(?![\w/])",
     re.IGNORECASE,
@@ -204,10 +206,13 @@ def index_page(url: str, text: str) -> list[_Occurrence]:
     return occ
 
 
+LINE_REACH = 300  # characters kept on each side of a number: a page can be one huge line
+
+
 def _line(text: str, pos: int) -> str:
-    start = text.rfind("\n", 0, pos) + 1
-    end = text.find("\n", pos)
-    return text[start:end if end >= 0 else len(text)].lower()
+    start = max(text.rfind("\n", max(0, pos - LINE_REACH), pos) + 1, pos - LINE_REACH, 0)
+    end = text.find("\n", pos, pos + LINE_REACH)
+    return text[start:end if end >= 0 else min(len(text), pos + LINE_REACH)].lower()
 
 
 # Written for each other in practice: "Gb/s" is gigabits on a router page and "GB/s" gigabytes on a GPU page.

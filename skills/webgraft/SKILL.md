@@ -16,8 +16,9 @@ metadata:
 
 Answer from pages you actually read: search to find them, `web_extract` to read them.
 
-The webgraft plugin appends the pages you opened under your answer, so do not write a sources
-list yourself.
+The webgraft plugin usually appends the pages you opened under your answer; its note on the user's
+message says whether it does. When it does, do not write a sources list yourself; when it does
+not, end your answer with the URLs of the pages you used.
 
 For a document or report with numbered inline citations, use `grounded-citations` instead.
 

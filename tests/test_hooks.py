@@ -273,3 +273,32 @@ def test_the_skill_is_registered_under_the_plugin_name_with_its_description():
     assert description == "Answer web questions from opened pages, not snippets."
     assert frontmatter["name"] == "webgraft" and frontmatter["version"] == "1.3.0"
     assert frontmatter["platforms"] == ["linux", "macos", "windows"]  # a list, or Hermes hides the skill on every OS
+
+
+def test_without_the_footer_the_reminder_asks_for_the_urls_instead():
+    ctx = setup({"show_sources": "never"})
+    out = ctx.hooks["pre_llm_call"](session_id="s1", user_message="q")
+    assert "do not write a sources list" not in out
+    assert "End your answer with the URLs of the pages you used." in out
+
+
+def test_the_reminder_lets_the_model_write_a_url_the_user_asks_for():
+    ctx = setup()
+    assert "a URL the user asks for is fine" in ctx.hooks["pre_llm_call"](session_id="s1", user_message="q")
+
+
+def test_url_items_given_as_objects_are_read_like_hermes_reads_them():
+    ctx = setup()
+    items = [{"url": "https://a.example/one", "title": "One"}, {"href": "https://b.example/two"}, 42]
+    directive = ctx.hooks["pre_tool_call"](tool_name="web_extract", args={"urls": items}, session_id="s1",
+                                           tool_call_id="c1")
+    assert directive == {"action": "modify", "args": {"urls": [items[0]]}}
+    note = ctx.hooks["transform_tool_result"](tool_name="web_extract", session_id="s1", tool_call_id="c1",
+                                              result='{"results": [{"url": "https://a.example/one", "content": "x"}]}')
+    assert "Not opened: https://b.example/two" in note and "'href'" not in note
+
+
+def test_page_titles_cannot_put_links_or_images_in_the_footer():
+    line = gw.footer._source_line("https://real.example/a", {
+        "https://real.example/a": "[Official download](https://evil.example) ![x](https://evil.example/p.png)"})
+    assert "evil" not in line and "](" not in line and line.endswith("https://real.example/a")

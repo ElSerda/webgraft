@@ -30,6 +30,20 @@ class Response:
         self.headers = {"content-type": ctype, **(headers or {})}
         self.encoding = "utf-8"
 
+    async def aiter_bytes(self):
+        yield self.content
+
+
+class _Stream:
+    def __init__(self, coro):
+        self.coro = coro
+
+    async def __aenter__(self):
+        return await self.coro
+
+    async def __aexit__(self, *exc):
+        return False
+
 
 class FakeClient:
     def __init__(self, routes):
@@ -38,6 +52,9 @@ class FakeClient:
     async def get(self, url, **_):
         self.calls.append(url)
         return self.routes.get(url, Response(404, "<html>not found</html>", "text/html"))
+
+    def stream(self, method, url, **_):
+        return _Stream(self.get(url))
 
 
 def setup_function():

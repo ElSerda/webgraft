@@ -135,6 +135,7 @@ Each page gets its own window, but they all land in one tool result. Above a sha
 - **Relevant passages first.** webgraft knows the question: the user's message and the model's search queries. On a page longer than the window, it moves the passages that mention the question's terms to the top.
   - Rare terms weigh more than terms found all over the page, tables of contents are skipped, and a table split by a page break stays whole.
   - A note tells the model this was done, and the rest of the page follows in its original order. Nothing is removed.
+  - The note does not name the question's words: Hermes caches a page for every session for a while.
   - Pages are cut into passages of about 600 characters where they have no paragraphs, as the text of an HTML page often does.
   - In the case above, the `keyless_rescue` passage moves from 215,000 characters in to the top of the window.
   - Setting: `focus`.
@@ -255,18 +256,20 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
 
 - **Network:** downloads the URLs the agent asks `web_extract` to read, directly from this machine with a desktop browser user agent, and, with `llms_txt` on, each site's `/llms.txt` once per hour (plus the `.md` version of a page it lists).
   - `setup` also checks the SearXNG URL you give it and reads two test pages on iana.org; with OCR chosen, RapidOCR downloads its models once from modelscope.cn (SHA-256 checked).
-  - Crawl4AI's browser loads the same URLs and their page assets.
+  - Crawl4AI's browser loads the same URLs, runs their scripts and loads their page assets.
 
 - **Private addresses:**
   - pages, `/llms.txt` and `.md` versions are fetched with Hermes's SSRF-safe client (`tools.url_safety`), which refuses private, loopback, link-local and cloud metadata addresses on every redirect hop;
   - a result names the page actually read in `url` (the requested URL is in `metadata.sourceURL`), so Hermes re-checks a redirect target against its SSRF and website policies;
   - the browser starts only after that download, on the address it reached, and its view is dropped when the page it ended on (after its own redirects and script navigation) is not a public address.
+  - **Limit:** only the page the browser ends on is checked. What that page itself requests (images, scripts, `fetch` calls) and the browser's own DNS lookups are not, so a hostile page can make the browser send requests to your network, as any browser that opened it could. If that matters on your network, skip Crawl4AI in `setup`: pages are then read by the SSRF-safe client alone.
 
 - **Processes:**
   - one Crawl4AI child process per page, at most three at once, each stopped after 60 seconds; it starts Hermes's Chromium headless (DevTools port on 127.0.0.1, temporary profile) and stops it before exiting;
   - one child process per document (Hermes's own Python running `doc_reader.py` with anydoc), stopped after 60 seconds;
   - for a scanned PDF with OCR installed, one more child process (`ocr_runner.py` in the OCR environment), stopped after 180 seconds.
-  - Children get a minimal environment (path, home and temp folders, locale, proxy settings, and what each one needs), never Hermes's API keys.
+  - A Crawl4AI read that times out or is cancelled is stopped with its Chromium; Crawl4AI's own log and cache go to a temporary folder, removed when the read ends.
+  - These children get a minimal environment (path, home and temp folders, locale, proxy settings, and what each one needs), never Hermes's API keys. `setup` and `status` also run Hermes's own `hermes pm` commands, as Hermes would.
 
 - **Writes:**
   - `web.search_backend`, `web.extract_backend`, `skills.auto_load` and, for SearXNG, `SEARXNG_URL` in `.env`, all through Hermes's own config functions and only during `setup` and `uninstall`;
@@ -304,7 +307,7 @@ With `show_sources: auto` it then adds nothing and leaves the reply to that plug
 - Pages behind logins or strong bot protection cannot be read; they come back as errors.
 
 - Hermes refuses private and internal addresses (127.0.0.1, 10.x, 192.168.x, link-local) before any extraction backend runs: an agent reading untrusted pages must not be able to reach your network.
-  - webgraft applies the same rule to redirects and to the browser (see "Private addresses" above).
+  - webgraft applies the same rule to redirects, and to the page the browser ends on (see "Private addresses" above for what that does not cover).
   - The result is "Blocked: URL targets a private or internal network address".
   - To read pages on your own LAN, set `security.allow_private_urls: true` in Hermes's `config.yaml`; cloud metadata addresses stay blocked.
 

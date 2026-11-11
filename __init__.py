@@ -30,7 +30,7 @@ MAX_PAGES_PER_SESSION = 30
 MAX_SESSIONS = 20
 
 _lock = threading.Lock()
-_turns: dict[str, dict[str, Any]] = {}
+_turns: "OrderedDict[str, dict[str, Any]]" = OrderedDict()  # interrupted turns never reach the footer
 _sessions: "OrderedDict[str, OrderedDict[str, tuple[str, str]]]" = OrderedDict()  # url -> (title, text)
 _questions: "OrderedDict[str, list[str]]" = OrderedDict()  # session -> user message, then search queries
 _ctx = None
@@ -87,19 +87,21 @@ REMINDER = (
     "[webgraft note to the assistant, not part of the user's message] "
     "If you search the web for this message: search snippets are not sources. "
     "Open the most relevant results with web_extract, one URL per call, before answering. "
-    "If a web_extract result lists pages it did not open, open the ones you still need. "
-    "webgraft itself adds the list of the pages you opened under your answer; "
-    "do not write a sources list or any URL."
+    "If a web_extract result lists pages it did not open, open the ones you still need."
 )
 # A message that holds a URL asks for that page, not for a search.
 URL_REMINDER = (
     "[webgraft note to the assistant, not part of the user's message] "
     "Open the URL in the user's message with web_extract, one URL per call, and answer from the page. "
     "If it cannot be read, say so; if you then search, search snippets are not sources: open the most "
-    "relevant results with web_extract before answering. "
-    "webgraft itself adds the list of the pages you opened under your answer; "
-    "do not write a sources list or any URL."
+    "relevant results with web_extract before answering."
 )
+# Said only when webgraft will add its footer: with show_sources off, or stepping aside for another
+# plugin that rewrites replies, the model has to cite its pages itself. A URL the user asks for is
+# still written.
+FOOTER_SENTENCE = ("webgraft itself adds the list of the pages you opened under your answer; "
+                   "do not write a sources list (a URL the user asks for is fine).")
+NO_FOOTER_SENTENCE = "End your answer with the URLs of the pages you used."
 _URL = re.compile(r"https?://\S+", re.IGNORECASE)
 # Hermes keeps the footer in the conversation, so a model sees it under its own earlier answers and
 # may copy it into an answer that opened nothing (seen in testing with a large cloud model). Said only then.
@@ -155,7 +157,8 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
             _questions.popitem(last=False)
     parts = []
     if _setting("remind", True):
-        parts.append(URL_REMINDER if _URL.search(str(user_message or "")) else REMINDER)
+        footer = FOOTER_SENTENCE if _footer_on() else NO_FOOTER_SENTENCE
+        parts.append((URL_REMINDER if _URL.search(str(user_message or "")) else REMINDER) + " " + footer)
     heading = _footer_in_history(conversation_history)
     if heading and compat.sources_mode(_setting("show_sources", "auto")) != "never":
         parts.append(FOOTER_NOTE.format(heading=heading))
@@ -173,11 +176,24 @@ def _remember(session_id: str, url: str, title: str, content: str) -> None:
         _sessions.popitem(last=False)
 
 
-def _urls(args: Any) -> list[str]:
+def _url_of(item: Any) -> Optional[str]:
+    """The URL of a web_extract item, as Hermes reads it: a string, or an object with a string
+    "url" or "href" (models sometimes pass a whole search result). None when unusable."""
+    if isinstance(item, dict):
+        item = item.get("url") or item.get("href")
+    return (item.strip() or None) if isinstance(item, str) else None
+
+
+def _items(args: Any) -> list:
+    """The web_extract items that hold a usable URL, as the model sent them."""
     urls = (args or {}).get("urls") if isinstance(args, dict) else None
-    if isinstance(urls, str):
-        return [urls]
-    return [str(u) for u in urls or [] if u]
+    if isinstance(urls, (str, dict)):
+        urls = [urls]
+    return [u for u in urls or [] if _url_of(u)] if isinstance(urls, list) else []
+
+
+def _urls(args: Any) -> list[str]:
+    return [_url_of(u) for u in _items(args)]
 
 
 _held: "OrderedDict[str, list[str]]" = OrderedDict()  # tool call -> URLs left out of it
@@ -201,7 +217,8 @@ def _guard_tool(tool_name: str = "", args: Any = None, session_id: str = "", too
             _held[_call_key(session_id, tool_call_id)] = urls[1:]
             while len(_held) > MAX_SESSIONS * 4:
                 _held.popitem(last=False)
-        directive = {"action": "modify", "args": {"urls": urls[:1]}}
+        # The first item as the model sent it (string or object): Hermes reads it the same way.
+        directive = {"action": "modify", "args": {"urls": _items(args)[:1]}}
     if urls and _setting("focus", True):
         with _lock:
             texts = list(_questions.get(session_id, []))
@@ -291,6 +308,9 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
     pages = _pages(result) if tool_name == "web_extract" else []
     with _lock:
         turn = _turns.setdefault(session_id, {"opened": [], "searched": False, "snippets": ""})
+        _turns.move_to_end(session_id)
+        while len(_turns) > MAX_SESSIONS:
+            _turns.popitem(last=False)
         if tool_name == "web_search":
             turn["searched"] = True
             turn["snippets"] = (turn["snippets"] + "\n" + _snippets(result))[-20_000:]
@@ -300,18 +320,23 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
                 turn["opened"].append(page["url"])
 
 
+def _footer_on() -> bool:
+    """Whether webgraft adds its footer to replies. Hermes keeps only the first plugin rewrite of a
+    reply: with show_sources auto, webgraft leaves it to another rewriter rather than hide its
+    output; always adds it anyway; never turns it off."""
+    mode = compat.sources_mode(_setting("show_sources", "auto"))
+    if mode == "never":
+        return False
+    return not (mode == "auto" and compat.other_reply_rewriters("webgraft", getattr(_ctx, "has_plugin", None)))
+
+
 def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> Optional[str]:
     with _lock:
         turn = _turns.pop(session_id, None)
         known = dict(_sessions.get(session_id, {}))
     if not response_text or (turn is None and not known):
         return None  # no web tool this turn and no page read before: nothing to report
-    mode = compat.sources_mode(_setting("show_sources", "auto"))
-    # Hermes keeps only the first plugin rewrite of a reply: leave it to another rewriter rather
-    # than hide its output, unless the user asked for this footer anyway (show_sources: always).
-    if mode == "never":
-        return None
-    if mode == "auto" and compat.other_reply_rewriters("webgraft", getattr(_ctx, "has_plugin", None)):
+    if not _footer_on():
         return None
     titles = {u: t for u, (t, _) in known.items()}
     opened = turn["opened"] if turn else []

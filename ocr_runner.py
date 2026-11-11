@@ -11,6 +11,7 @@ import json
 import sys
 
 RENDER_SCALE = 2.0  # 144 dpi: small print stays readable, memory stays modest
+MAX_PIXELS = 20_000_000  # about 80 MB as RGBA; an A4 page at RENDER_SCALE is about 2 million
 
 
 def ocr(data: bytes, pages: list[int], max_chars: int) -> dict:
@@ -23,7 +24,11 @@ def ocr(data: bytes, pages: list[int], max_chars: int) -> dict:
     for number in pages:
         if not 1 <= number <= len(pdf):
             continue
-        image = pdf[number - 1].render(scale=RENDER_SCALE).to_pil()
+        page = pdf[number - 1]
+        width, height = page.get_size()  # points
+        # A page can declare any size: cap the rendered image (MAX_PIXELS) so it cannot take GBs.
+        scale = min(RENDER_SCALE, (MAX_PIXELS / max(1.0, width * height)) ** 0.5)
+        image = page.render(scale=scale).to_pil()
         result = engine(image)
         text = "\n".join(result.txts or ()) if result is not None else ""
         out[str(number)] = text

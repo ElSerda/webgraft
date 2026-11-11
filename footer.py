@@ -61,7 +61,11 @@ def language_of(text: str, setting: str = "auto") -> str:
 
 def _source_line(url: str, titles: dict[str, str]) -> str:
     """"- Page title: https://..." with the link bare, so terminals, Desktop and chat apps make it clickable."""
-    title = re.sub(r"\s+", " ", titles.get(url, "")).strip()
+    # The title comes from the page: no Markdown that could render as a link or an image, and no
+    # URL of its own, so the line can only point where webgraft says.
+    title = re.sub(r"\S*://\S*", " ", titles.get(url, "") or "")
+    title = re.sub(r"[\[\]()<>!`\\]", " ", title)
+    title = re.sub(r"\s+", " ", title).strip(" :-")
     if len(title) > 80:
         title = title[:77].rstrip() + "..."
     return f"- {title}: {url}" if title else f"- {url}"
