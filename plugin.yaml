@@ -32,7 +32,7 @@ config_schema:
     type: bool
     default: true
     label: Remind the model to open pages
-    description: "Adds a short reminder (about 70 tokens) to each user message: search snippets are not sources, open the pages"
+    description: "Adds a short reminder (about 110 tokens) to each user message: search snippets are not sources, open the pages"
   one_url_per_call:
     type: bool
     default: true

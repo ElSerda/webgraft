@@ -141,6 +141,24 @@ def _pages_from_history(history: Any) -> list[dict]:
     return pages
 
 
+def _text_of(message: Any) -> str:
+    """The text of a user message. On a multimodal turn Hermes passes a list of parts (text, image):
+    only the text parts count, so an image URL is not taken for a page to open."""
+    if isinstance(message, str):
+        return message
+    if isinstance(message, list):
+        texts = []
+        for part in message:
+            if isinstance(part, str):
+                texts.append(part)
+            elif isinstance(part, dict) and part.get("type") in (None, "text", "input_text"):
+                text = part.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+        return "\n".join(texts)
+    return ""
+
+
 def _start_turn(session_id: str = "", user_message: Any = "", conversation_history: Any = None,
                 **_: Any) -> Optional[str]:
     # A resumed conversation runs in a new process: its earlier pages come back from the history.
@@ -151,14 +169,14 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
     # An interrupted turn never reaches the transform hook, so its record is dropped here.
     with _lock:
         _turns.pop(session_id, None)
-        _questions[session_id] = [str(user_message or "")[:2000]]
+        _questions[session_id] = [_text_of(user_message)[:2000]]
         _questions.move_to_end(session_id)
         while len(_questions) > MAX_SESSIONS:
             _questions.popitem(last=False)
     parts = []
     if _setting("remind", True):
         footer = FOOTER_SENTENCE if _footer_on() else NO_FOOTER_SENTENCE
-        parts.append((URL_REMINDER if _URL.search(str(user_message or "")) else REMINDER) + " " + footer)
+        parts.append((URL_REMINDER if _URL.search(_text_of(user_message)) else REMINDER) + " " + footer)
     heading = _footer_in_history(conversation_history)
     if heading and compat.sources_mode(_setting("show_sources", "auto")) != "never":
         parts.append(FOOTER_NOTE.format(heading=heading))
@@ -227,7 +245,7 @@ def _guard_tool(tool_name: str = "", args: Any = None, session_id: str = "", too
             window = max(2_000, min(int(limit), 500_000)) if limit is not None else focus.hermes_window()
         except (TypeError, ValueError):
             window = focus.hermes_window()
-        focus.expect(urls[0], focus.terms_of(*texts), window)
+        focus.expect(urls[0], focus.terms_of(*texts), window, session_id)
     return directive
 
 

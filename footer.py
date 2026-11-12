@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 _TEXT = {
     "en": {
@@ -63,11 +64,16 @@ def _source_line(url: str, titles: dict[str, str]) -> str:
     """"- Page title: https://..." with the link bare, so terminals, Desktop and chat apps make it clickable."""
     # The title comes from the page: no Markdown that could render as a link or an image, and no
     # URL of its own, so the line can only point where webgraft says.
-    title = re.sub(r"\S*://\S*", " ", titles.get(url, "") or "")
+    raw = (titles.get(url, "") or "")[:300]  # shown up to 80 characters; bounded before the regexes
+    title = "".join(ch for ch in raw if unicodedata.category(ch) != "Cf")  # bidi, zero-width
+    title = re.sub(r"\S*://\S*|\S+@\S+|\bwww\.\S+", " ", title)  # URLs, e-mails, www. names: autolinked
     title = re.sub(r"[\[\]()<>!`\\]", " ", title)
     title = re.sub(r"\s+", " ", title).strip(" :-")
     if len(title) > 80:
         title = title[:77].rstrip() + "..."
+    # The URL comes from the page's redirects: characters that Markdown reads as link or image
+    # syntax are percent-encoded, so the line stays one plain link to that address.
+    url = re.sub(r"[\[\]()<>`\s]", lambda m: f"%{ord(m.group()):02X}", url)
     return f"- {title}: {url}" if title else f"- {url}"
 
 

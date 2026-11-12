@@ -327,7 +327,8 @@ def step_search(args, s: dict, interactive: bool) -> None:
                             "DuckDuckGo search runs through the ddgs package, which Hermes installs on request."):
                 return
             from pm import ensure_import
-            ensure_import("ddgs")
+            if _install(lambda: ensure_import("ddgs"), "Hermes's ddgs extra") is None:
+                return
         if s["search_backend"] == "ddgs":
             ok("Search backend already ddgs")
         else:
@@ -364,7 +365,7 @@ def _find_chromium(interactive: bool):
     if not _confirm("Install Hermes's Chromium with `hermes pm install chromium`?", True, interactive,
                     "Hermes's own pinned Chromium, the one its browser tool uses. Crawl4AI drives it."):
         return None
-    hermes = shutil.which("hermes")
+    hermes = browser.which("hermes")
     if hermes is None or subprocess.run([hermes, "pm", "install", "chromium"]).returncode != 0:
         error("`hermes pm install chromium` failed.")
         return None
@@ -393,7 +394,9 @@ def step_crawl4ai(args, s: dict, interactive: bool) -> None:
     if not s["crawl4ai_python"]:
         from pm import ensure_environment
         info("Preparing the environment (a few minutes the first time)...")
-        ensure_environment(extract.CRAWL4AI_ENV, [CRAWL4AI_REQUIREMENT], explicit=True)
+        if _install(lambda: ensure_environment(extract.CRAWL4AI_ENV, [CRAWL4AI_REQUIREMENT], explicit=True),
+                    "the Crawl4AI environment") is None:
+            return
     chromium = _find_chromium(interactive)
     if chromium is None:
         error("Crawl4AI stays off until a Chromium is available.")
@@ -407,6 +410,16 @@ OLD_SKILLS = ("webgraft:web-research",)  # names of earlier versions, dropped fr
 
 
 OCR_WARMUP = "from rapidocr import RapidOCR; RapidOCR(); print('models ready')"
+
+
+def _install(action, what: str):
+    """Runs a Hermes PM install and returns its result, or None after reporting why it failed.
+    pm.InstallError carries the cause and the remedy (a restart Hermes needs, `hermes pm doctor`)."""
+    try:
+        return action() or True
+    except Exception as exc:  # noqa: BLE001 - pm.InstallError and friends: reported, setup goes on
+        error(f"Could not install {what}: {exc}")
+        return None
 
 
 def step_ocr(args, s: dict, interactive: bool) -> None:
@@ -427,10 +440,13 @@ def step_ocr(args, s: dict, interactive: bool) -> None:
         return
     from pm import ensure_environment
     info("Preparing the environment (a few minutes the first time)...")
-    python = ensure_environment(extract.OCR_ENV, extract.OCR_REQUIREMENTS, explicit=True)
+    python = _install(lambda: ensure_environment(extract.OCR_ENV, extract.OCR_REQUIREMENTS, explicit=True),
+                      "the OCR environment")
+    if python is None:
+        return
     info("Downloading the OCR models...")
     done = subprocess.run([str(python), "-I", "-c", OCR_WARMUP], capture_output=True, text=True,
-                          env=extract.child_env())
+                          env=extract.child_env(), cwd=extract.CHILD_CWD)
     if done.returncode == 0:
         ok("OCR installed")
     else:

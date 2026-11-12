@@ -98,7 +98,8 @@ def _clean(text: str) -> str:
     text = re.sub(r"[¹²³⁰-₟]", "", text)  # footnote marks, before NFKC turns them into digits
     text = re.sub(r"[‐-―−]", "-", text)  # non-breaking hyphen, dashes, minus sign
     text = unicodedata.normalize("NFKC", text)
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)  # markdown links -> their text
+    # Bounded repeats: an unclosed "[" must not make every later attempt re-read the rest of the page.
+    text = re.sub(r"\[([^\]]{0,500})\]\([^)]{0,2000}\)", r"\1", text)  # markdown links -> their text
     return text.replace("**", "").replace("__", "")
 
 

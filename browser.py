@@ -14,8 +14,8 @@ recorded path, so they never start a `hermes` process.
 from __future__ import annotations
 
 import json
+import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -58,8 +58,23 @@ def _from_config() -> Path | None:
     return Path(value) if value and Path(value).is_file() else None
 
 
+def which(name: str) -> str | None:
+    """`name` found in the absolute folders of PATH only. shutil.which() also looks in the current
+    folder on Windows, where a file planted in the folder Hermes runs from would win."""
+    exts = [""] + ([e.lower() for e in (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";") if e]
+                   if os.name == "nt" else [])
+    for folder in (os.environ.get("PATH") or "").split(os.pathsep):
+        if not folder or not os.path.isabs(folder):
+            continue
+        for ext in exts:
+            candidate = os.path.join(folder, name + ext)
+            if os.path.isfile(candidate) and (os.name == "nt" or os.access(candidate, os.X_OK)):
+                return candidate
+    return None
+
+
 def _from_pm() -> Path | None:
-    hermes = shutil.which("hermes")
+    hermes = which("hermes")
     if hermes is None:
         return None
     try:
@@ -83,7 +98,7 @@ def _from_docker() -> Path | None:
 
 def _from_path() -> Path | None:
     for name in ("chromium", "chromium-browser"):
-        if found := shutil.which(name):
+        if found := which(name):
             return Path(found)
     return None
 

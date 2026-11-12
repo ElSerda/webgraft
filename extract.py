@@ -14,12 +14,17 @@ Order for one URL:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import json
 import logging
 import os
 import re
+import shutil
 import sys
+import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,7 +55,8 @@ MAX_COMPLEMENT_CHARS = 8_000
 # to stay in the tail of Hermes's per-page window.
 MAX_LINKS = 40
 MAX_LINKS_CHARS = 3_000
-BROWSERS_AT_ONCE = 3  # each Crawl4AI call starts its own headless Chromium
+BROWSERS_AT_ONCE = 3  # each Crawl4AI read starts its own headless Chromium; a limit for the whole process
+HEAD_CHARS = 100_000  # of the browser's HTML, for the page's AI opt-out tags
 SHORT_PAGE_CHARS = 1_500
 CRAWL4AI_ENV = "webgraft-crawl4ai"
 RUNNER = Path(__file__).with_name("crawl4ai_runner.py")
@@ -58,7 +64,9 @@ OCR_ENV = "webgraft-ocr"
 OCR_REQUIREMENTS = ["rapidocr>=3.10,<4", "onnxruntime>=1.20,<2", "pypdfium2>=5,<6"]
 OCR_RUNNER = Path(__file__).with_name("ocr_runner.py")
 OCR_MAX_PAGES = 30
-OCR_TIMEOUT = 180  # rendering and reading 30 pages on a CPU stays well below this
+# Below Hermes's own cap on one extract call (web.extract_timeout, 120 s by default), which cancels
+# the call: the child is then stopped too. 30 pages on a CPU take well under this.
+OCR_TIMEOUT = 100
 
 # Bot walls and challenge pages. Phrases only a challenge page uses count anywhere near the top,
 # whatever the page length; words an article about the topic also uses ("captcha", "access
@@ -129,6 +137,43 @@ CHILD_ENV_KEYS = (
 )
 
 
+# Children start in the plugin's own folder, not in the folder Hermes runs from: on Windows a
+# program name without a path is looked up in the current folder first.
+CHILD_CWD = str(Path(__file__).resolve().parent)
+
+
+def taskkill_exe() -> str:
+    """taskkill by its full path, for the same reason."""
+    root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or "C:\\Windows"
+    return os.path.join(root, "System32", "taskkill.exe")
+
+
+async def _kill(proc) -> None:
+    """Stop a child process and wait for it (used on timeout and when Hermes cancels the call)."""
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), 10)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _communicate(proc, data: bytes | None, timeout: float, what: str) -> tuple[bytes, bytes]:
+    """proc.communicate() with a time limit. On the limit, or when Hermes cancels the call (its
+    web.extract_timeout, an interrupted turn), the child is stopped: it never outlives the call."""
+    try:
+        return await asyncio.wait_for(proc.communicate(data), timeout)
+    except asyncio.TimeoutError:
+        await _kill(proc)
+        raise RuntimeError(f"{what} stopped after {timeout:g}s") from None
+    except asyncio.CancelledError:
+        await asyncio.shield(_kill(proc))
+        raise
+
+
 def child_env(**extra: str) -> dict[str, str]:
     """A minimal environment for a child process: CHILD_ENV_KEYS and the locale (LC_*) from ours,
     PYTHONIOENCODING, and the variables this child needs (`extra`)."""
@@ -170,6 +215,8 @@ def ssrf_blocked(exc: BaseException) -> bool:
     raises when DNS fails; that is an ordinary download failure, not a private address."""
     seen = 0
     while exc is not None and seen < 5:
+        if isinstance(exc, RedirectBlocked):
+            return True
         if any(cls.__name__ == "SSRFConnectionBlocked" for cls in type(exc).__mro__):
             return "DNS" not in str(exc)
         exc, seen = exc.__cause__ or exc.__context__, seen + 1
@@ -413,14 +460,9 @@ async def document_text_isolated(data: bytes, fmt: str | None = None) -> str:
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-s", str(DOC_READER), str(READ_CHARS), fmt or "",
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env=env, **kwargs,
+        env=env, cwd=CHILD_CWD, **kwargs,
     )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(data), DOC_TIMEOUT)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise RuntimeError(f"document reading stopped after {DOC_TIMEOUT}s") from None
+    out, err = await _communicate(proc, data, DOC_TIMEOUT, "document reading")
     if proc.returncode != 0:
         raise RuntimeError(_child_failure(err.decode("utf-8", "replace")))
     result = json.loads(out.decode("utf-8"))
@@ -465,13 +507,9 @@ async def ocr_isolated(data: bytes, pages: list[int]) -> str:
     proc = await asyncio.create_subprocess_exec(
         str(python), "-I", str(OCR_RUNNER), ",".join(str(p) for p in wanted), str(READ_CHARS),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+        cwd=CHILD_CWD,
     )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(data), OCR_TIMEOUT)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise RuntimeError(f"OCR stopped after {OCR_TIMEOUT}s") from None
+    out, _ = await _communicate(proc, data, OCR_TIMEOUT, "OCR")
     lines = [ln for ln in out.decode("utf-8", "replace").splitlines() if ln.startswith("{")]
     result = json.loads(lines[-1]) if lines else {"error": "OCR gave no output"}
     if result.get("error"):
@@ -511,14 +549,70 @@ def crawl4ai_python() -> Path | None:
         return None
 
 
-async def browser_view(url: str, slots: asyncio.Semaphore | None = None) -> dict:
-    """Crawl4AI result for one URL: {success, status, markdown, title, error}."""
-    # slots: created per read_pages call, inside its event loop. An asyncio.Semaphore is bound to
-    # the loop it first runs in, and Hermes may call the provider from different loops.
-    if slots is None:
+_browsers_lock = threading.Lock()
+_browsers_running = 0
+
+
+@contextlib.asynccontextmanager
+async def _browser_slot():
+    """At most BROWSERS_AT_ONCE browser reads in this Hermes process, across calls and event loops
+    (Hermes may call the provider from different loops, so no asyncio primitive is shared)."""
+    global _browsers_running
+    while True:
+        with _browsers_lock:
+            if _browsers_running < BROWSERS_AT_ONCE:
+                _browsers_running += 1
+                break
+        await asyncio.sleep(0.2)
+    try:
+        yield
+    finally:
+        with _browsers_lock:
+            _browsers_running -= 1
+
+
+async def browser_view(url: str) -> dict:
+    """Crawl4AI result for one URL: {success, status, final_url, title, markdown, head, error}."""
+    async with _browser_slot():
         return await _browser_view(url)
-    async with slots:
-        return await _browser_view(url)
+
+
+# Temporary folders webgraft makes for the browser (and the names older versions used). Hermes can
+# be stopped in the middle of a read, so those left over from an earlier run are removed, once per
+# process, when they are more than STALE_SECONDS old: a read in progress is never older than 60 s.
+TEMP_PREFIXES = ("webgraft-browser-", "webgraft-chromium-", "webgraft-crawl4ai-")
+STALE_SECONDS = 3600
+_pruned = False
+
+
+def prune_stale_folders(now: float | None = None) -> int:
+    """Remove webgraft's own temporary folders left by an earlier run. Returns how many."""
+    root, now, removed = tempfile.gettempdir(), now or time.time(), 0
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return 0
+    for name in names:
+        path = os.path.join(root, name)
+        if not name.startswith(TEMP_PREFIXES) or os.path.islink(path) or not os.path.isdir(path):
+            continue
+        try:
+            if now - os.path.getmtime(path) < STALE_SECONDS:
+                continue
+        except OSError:
+            continue
+        _remove_folder(path)
+        removed += not os.path.exists(path)
+    return removed
+
+
+def _remove_folder(path: str) -> None:
+    """Remove a temporary folder; on Windows a just-killed Chromium can hold files for a moment."""
+    for _ in range(10):
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path):
+            return
+        time.sleep(0.3)
 
 
 async def _browser_view(url: str) -> dict:
@@ -528,24 +622,37 @@ async def _browser_view(url: str) -> dict:
     chromium = browser.recorded()
     if chromium is None:
         return {"success": False, "error": "no Chromium recorded: run `hermes webgraft setup`"}
-    proc = await asyncio.create_subprocess_exec(
-        str(python), "-I", str(RUNNER), url, str(chromium),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env=child_env(CRAWL4AI_NO_CLOUD_NOTICE="1"),
-        **({} if os.name == "nt" else {"start_new_session": True}),  # its own group, Chromium included
-    )
+    global _pruned
+    if not _pruned:
+        _pruned = True
+        await asyncio.to_thread(prune_stale_folders)
+    # The browser profile and Crawl4AI's log and cache live in this folder, made and removed here:
+    # when the runner has to be killed, its own clean-up never runs.
+    work = tempfile.mkdtemp(prefix="webgraft-browser-")
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), BROWSER_TIMEOUT)
-    except asyncio.TimeoutError:
-        await _stop_tree(proc)
-        return {"success": False, "error": f"browser timed out after {BROWSER_TIMEOUT}s"}
-    except asyncio.CancelledError:  # Hermes's extract timeout, or the turn was interrupted
-        await asyncio.shield(_stop_tree(proc))
-        raise
+        proc = await asyncio.create_subprocess_exec(
+            str(python), "-I", str(RUNNER), url, str(chromium), work,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=child_env(CRAWL4AI_NO_CLOUD_NOTICE="1"), cwd=CHILD_CWD,
+            **({} if os.name == "nt" else {"start_new_session": True}),  # its own group, Chromium included
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), BROWSER_TIMEOUT)
+        except asyncio.TimeoutError:
+            await _stop_tree(proc)
+            return {"success": False, "error": f"browser timed out after {BROWSER_TIMEOUT}s"}
+        except asyncio.CancelledError:  # Hermes's extract timeout, or the turn was interrupted
+            await asyncio.shield(_stop_tree(proc))
+            raise
+    finally:
+        await asyncio.shield(asyncio.to_thread(_remove_folder, work))
     lines = [ln for ln in out.decode("utf-8", "replace").splitlines() if ln.startswith("{")]
     if not lines:
         return {"success": False, "error": (err.decode("utf-8", "replace").strip().splitlines() or ["no output"])[-1][:300]}
-    return await vet_view(json.loads(lines[-1]))
+    view = json.loads(lines[-1])
+    view["markdown"] = str(view.get("markdown") or "")[:READ_CHARS]
+    view["head"] = str(view.get("head") or "")[:HEAD_CHARS]
+    return await vet_view(view)
 
 
 async def _stop_tree(proc) -> None:
@@ -556,8 +663,9 @@ async def _stop_tree(proc) -> None:
     try:
         if os.name == "nt":
             killer = await asyncio.create_subprocess_exec(
-                "taskkill", "/T", "/F", "/PID", str(proc.pid),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                taskkill_exe(), "/T", "/F", "/PID", str(proc.pid),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                env=child_env(), cwd=CHILD_CWD)
             await asyncio.wait_for(killer.wait(), 15)
         else:
             import signal
@@ -598,8 +706,27 @@ async def vet_view(view: dict) -> dict:
 _last_status: contextvars.ContextVar[int] = contextvars.ContextVar("webgraft_last_status", default=0)
 
 
-async def _note_status(response) -> None:  # httpx response hook, runs in the reading task
+class RedirectBlocked(ValueError):
+    """A redirect target that is not a public address, refused by webgraft's own check."""
+
+
+def proxy_configured() -> bool:
+    return any(os.environ.get(k) for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                                           "http_proxy", "https_proxy", "all_proxy"))
+
+
+async def _note_status(response) -> None:
+    """httpx response hook, run in the reading task for every response, redirects included.
+
+    Notes the status (see _blocked_redirect). With a proxy configured, Hermes's SSRF-safe client
+    leaves each hop to the proxy (only direct connections are checked), so webgraft checks the
+    target of each redirect itself before it is followed."""
     _last_status.set(response.status_code)
+    if getattr(response, "is_redirect", False) and proxy_configured():
+        from urllib.parse import urljoin
+        target = urljoin(str(response.url), response.headers.get("location", ""))
+        if not await url_is_safe(target):
+            raise RedirectBlocked("redirect to a private or internal network address")
 
 
 async def _download(client, url: str):
@@ -625,9 +752,9 @@ def _origin(status: int, reason: str) -> str:
     return f"HTTP {status or 200} from origin: {reason}"[:300]
 
 
-async def read_page(client, url: str, slots: asyncio.Semaphore | None = None) -> Page:
+async def read_page(client, url: str) -> Page:
     try:
-        return await _read_page(client, url, slots)
+        return await _read_page(client, url)
     except Exception as exc:  # noqa: BLE001 - one bad page never fails the whole call
         logger.warning("webgraft: reading %s failed", url, exc_info=True)
         return Page(url, error=f"could not read the page: {exc.__class__.__name__}: {exc}"[:300])
@@ -667,11 +794,11 @@ def _optout(status: int, headers: dict, html: str = "") -> str:
     return _origin(status, f"the site asks not to be used by AI ({reason})") if reason else ""
 
 
-async def _read_page(client, url: str, slots: asyncio.Semaphore | None = None) -> Page:
+async def _read_page(client, url: str) -> Page:
     from_index, llms_url = await _from_llms_txt(client, url)
     if from_index:
         return from_index
-    page = await _read_page_itself(client, url, slots)
+    page = await _read_page_itself(client, url)
     if llms_url and not page.error:
         page.content += f"\n\n[webgraft: this site publishes an index for language models: {llms_url}]"
     return page
@@ -685,11 +812,11 @@ def _blocked_redirect(status: int) -> str:
     when the redirect's status is known: the site itself sent the agent there, so Hermes must not
     hand the URL to its keyless rescue, an outside service that would fetch it again."""
     if 300 <= status < 400:
-        return _origin(status, "redirects to a private or internal network address (blocked)")
+        return _origin(status, "redirects to a private or internal network address; webgraft did not follow it")
     return BLOCKED_ADDRESS
 
 
-async def _read_page_itself(client, url: str, slots: asyncio.Semaphore | None = None) -> Page:
+async def _read_page_itself(client, url: str) -> Page:
     try:
         response, body, too_big = await _download(client, url)
         status, ctype = response.status_code, response.headers.get("content-type", "").lower()
@@ -723,18 +850,24 @@ async def _read_page_itself(client, url: str, slots: asyncio.Semaphore | None = 
 
     title, main, html, headers = "", "", "", {}
     if not fetch_error:
-        html = body[:MAX_HTML_BYTES].decode(response.encoding or "utf-8", "replace")
+        html = await asyncio.to_thread(site_rules.decoded, response, body[:MAX_HTML_BYTES])
         headers = dict(response.headers)
         if opted_out := _optout(status, headers, html):
             return Page(url, error=opted_out)
     # The browser starts once the download is done, on the address it reached: a URL whose
     # download was refused never reaches Chromium.
-    browser = None if is_document(final, ctype, b"") else asyncio.create_task(browser_view(final, slots))
+    browser = None if is_document(final, ctype, b"") else asyncio.create_task(browser_view(final))
     if not fetch_error:
         title, main = await asyncio.to_thread(html_text, html, final)
 
     view = await browser if browser else {"success": False}
     view_ok = view.get("success") and int(view.get("status") or 200) < 400
+    if view_ok and not fetch_error and not same_site(final, str(view.get("final_url") or "")):
+        # The browser ended on another site than the page downloaded: its text is not this page's,
+        # and Hermes's website policy would only ever see the downloaded URL.
+        view_ok = False
+    if view_ok and (opted_out := _optout(int(view.get("status") or 200), {}, str(view.get("head") or ""))):
+        return Page(url, error=opted_out)  # the browser's copy of the page asks not to be used by AI
     if fetch_error and not view_ok:
         return Page(url, error=fetch_error)  # 404, 410, 5xx...: the browser saw no better
     browser_md = view.get("markdown", "") if view_ok else ""
@@ -756,12 +889,24 @@ async def _read_page_itself(client, url: str, slots: asyncio.Semaphore | None = 
     return Page(final, title, content, engine=engine, links=links, requested=url)
 
 
+def same_site(a: str, b: str) -> bool:
+    """Same host, ignoring case and a leading "www."."""
+    from urllib.parse import urlsplit
+
+    def host(u: str) -> str:
+        try:
+            h = (urlsplit(u).hostname or "").lower()
+        except ValueError:
+            return ""
+        return h[4:] if h.startswith("www.") else h
+    return bool(host(a)) and host(a) == host(b)
+
+
 async def read_pages(urls: list[str]) -> list[Page]:
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.8,fr;q=0.6"}
     async with http_client(follow_redirects=True, timeout=FETCH_TIMEOUT, headers=headers,
                            event_hooks={"response": [_note_status]}) as client:
-        slots = asyncio.Semaphore(BROWSERS_AT_ONCE)
-        return list(await asyncio.gather(*(read_page(client, u, slots) for u in urls)))
+        return list(await asyncio.gather(*(read_page(client, u) for u in urls)))
 
 
 if __name__ == "__main__" and len(sys.argv) > 1:  # manual check: python -m ... URL

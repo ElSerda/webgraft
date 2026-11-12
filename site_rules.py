@@ -13,6 +13,7 @@ Opt-outs: a page that asks not to be used by AI is returned as an error, not as 
 
 from __future__ import annotations
 
+import codecs
 import re
 import threading
 import time
@@ -96,8 +97,32 @@ async def get_capped(client, url: str, limit: int, timeout: float | None = None)
         return response, b"".join(chunks)
 
 
+# Codecs a server may name for a page. Python also accepts names such as punycode, idna, hex or
+# zlib, which are not text encodings and can be slow to decode: those fall back to UTF-8.
+_TEXT_CODECS = frozenset(
+    codecs.lookup(name).name for name in (
+        "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be",
+        "ascii", "latin-1", "iso8859-2", "iso8859-3", "iso8859-4", "iso8859-5", "iso8859-6", "iso8859-7",
+        "iso8859-8", "iso8859-9", "iso8859-10", "iso8859-11", "iso8859-13", "iso8859-14", "iso8859-15",
+        "iso8859-16", "cp1250", "cp1251", "cp1252", "cp1253", "cp1254", "cp1255", "cp1256", "cp1257",
+        "cp1258", "cp874", "cp437", "cp850", "cp866", "koi8-r", "koi8-u", "mac-roman", "mac-cyrillic",
+        "shift_jis", "cp932", "euc-jp", "iso2022-jp", "euc-kr", "cp949", "gb2312", "gbk", "gb18030",
+        "big5", "big5hkscs", "cp950", "tis-620",
+    )
+)
+
+
+def text_codec(name: str | None) -> str:
+    """The codec to decode a page with: the one the server named when it is a text encoding."""
+    try:
+        codec = codecs.lookup(name or "utf-8").name
+    except LookupError:
+        return "utf-8"
+    return codec if codec in _TEXT_CODECS else "utf-8"
+
+
 def decoded(response, body: bytes) -> str:
-    return body.decode(getattr(response, "encoding", None) or "utf-8", "replace")
+    return body.decode(text_codec(getattr(response, "encoding", None)), "replace")
 
 
 async def llms_index(client, url: str) -> tuple[str, frozenset[str]] | None:

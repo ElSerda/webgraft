@@ -1,10 +1,10 @@
 ---
 name: webgraft
 description: "Answer web questions from opened pages, not snippets."
-version: 1.3.0
+version: 1.4.0
 author: ElSerda
 license: MIT
-platforms: [linux, macos, windows]
+platforms: [linux, windows]
 metadata:
   hermes:
     tags: [Research, Web, Search, Grounding, Sources]

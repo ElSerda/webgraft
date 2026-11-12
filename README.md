@@ -69,7 +69,7 @@ webgraft fixes the first two, pushes against the third, and shows which pages th
 2. **Download it.** An HTTP error (404, 410, 5xx) is reported as an error, unless a browser can still open the page.
 
 3. **Documents** (PDF, Office, OpenDocument, EPUB, RTF, CSV): Markdown, tables included, with anydoc, the converter Hermes's own `read_file` uses (its `doc-extract` extra, installed by `setup` or on first use).
-   - It runs in a separate process stopped after 60 seconds (and, on Linux and macOS, limited to 2 GB of address space and run with 4 threads), so a crafted document cannot hang Hermes or take over the machine.
+   - It runs in a separate process stopped after 60 seconds (and, on Linux, limited to 2 GB of address space and run with 4 threads), so a crafted document cannot hang Hermes or take over the machine.
    - A scanned PDF (page images, no text layer) is read by local OCR when it is installed: RapidOCR, no language model, about 1 second per page; the text comes with a note that it was read by OCR. Without OCR, the error names the scanned pages.
 
    HTML: main text with trafilatura.
@@ -231,7 +231,7 @@ Under Settings → Plugins in Hermes Desktop, or `plugins.entries.webgraft.setti
 |---|---|---|
 | `language` | `auto` | Footer language: `auto` (Hermes's `display.language`; English for languages other than en/fr), `answer` (the reply's language), `en` or `fr` |
 | `show_sources` | `auto` | `auto`: list the opened pages, unless another plugin also rewrites replies (see below). `always`: list them anyway. `never`: no list |
-| `remind` | `true` | Add a short note to each user message (about 70 tokens), marked as a note and not the request: search snippets are not sources, open the pages, and open the pages a multi-URL call left out. When the message holds a URL, the note asks to open that page instead of searching |
+| `remind` | `true` | Add a short note to each user message (about 110 tokens), marked as a note and not the request: search snippets are not sources, open the pages, and open the pages a multi-URL call left out. When the message holds a URL, the note asks to open that page instead of searching |
 | `one_url_per_call` | `true` | A `web_extract` call that asks for several URLs reads only the first; the result lists the others |
 | `focus` | `true` | On a page longer than what Hermes shows the model, put the passages about the question first (nothing is removed) |
 | `llms_txt` | `true` | When the site's `llms.txt` lists a Markdown version of the page, read that instead of the HTML |
@@ -254,21 +254,23 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
 
 - **Skill:** `webgraft:webgraft`, read-only, loaded only if you auto-load it or call it.
 
-- **Network:** downloads the URLs the agent asks `web_extract` to read, directly from this machine with a desktop browser user agent, and, with `llms_txt` on, each site's `/llms.txt` once per hour (plus the `.md` version of a page it lists).
+- **Network:** downloads the URLs the agent asks `web_extract` to read, directly from this machine with a desktop Chrome user agent (sites that refuse unknown clients serve it the page; it does not name Hermes or webgraft), and, with `llms_txt` on, each site's `/llms.txt` once per hour (plus the `.md` version of a page it lists).
   - `setup` also checks the SearXNG URL you give it and reads two test pages on iana.org; with OCR chosen, RapidOCR downloads its models once from modelscope.cn (SHA-256 checked).
   - Crawl4AI's browser loads the same URLs, runs their scripts and loads their page assets.
 
 - **Private addresses:**
   - pages, `/llms.txt` and `.md` versions are fetched with Hermes's SSRF-safe client (`tools.url_safety`), which refuses private, loopback, link-local and cloud metadata addresses on every redirect hop;
+  - **with a proxy** (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`), Hermes's client checks only direct connections and leaves each hop to the proxy: webgraft then checks the target of every redirect itself before it is followed. Which addresses the proxy itself can reach is the proxy's business;
   - a result names the page actually read in `url` (the requested URL is in `metadata.sourceURL`), so Hermes re-checks a redirect target against its SSRF and website policies;
-  - the browser starts only after that download, on the address it reached, and its view is dropped when the page it ended on (after its own redirects and script navigation) is not a public address.
+  - the browser starts only after that download, on the address it reached, and its view is dropped when the page it ended on (after its own redirects and script navigation) is not a public address, or is on another site than the page downloaded;
   - **Limit:** only the page the browser ends on is checked. What that page itself requests (images, scripts, `fetch` calls) and the browser's own DNS lookups are not, so a hostile page can make the browser send requests to your network, as any browser that opened it could. If that matters on your network, skip Crawl4AI in `setup`: pages are then read by the SSRF-safe client alone.
 
 - **Processes:**
-  - one Crawl4AI child process per page, at most three at once, each stopped after 60 seconds; it starts Hermes's Chromium headless (DevTools port on 127.0.0.1, temporary profile) and stops it before exiting;
+  - one Crawl4AI child process per page, at most three at once in the whole Hermes process, each stopped after 60 seconds; it starts Hermes's Chromium headless (DevTools port on 127.0.0.1, temporary profile) and stops it before exiting;
   - one child process per document (Hermes's own Python running `doc_reader.py` with anydoc), stopped after 60 seconds;
-  - for a scanned PDF with OCR installed, one more child process (`ocr_runner.py` in the OCR environment), stopped after 180 seconds.
-  - A Crawl4AI read that times out or is cancelled is stopped with its Chromium; Crawl4AI's own log and cache go to a temporary folder, removed when the read ends.
+  - for a scanned PDF with OCR installed, one more child process (`ocr_runner.py` in the OCR environment), stopped after 100 seconds.
+  - Each child is also stopped when Hermes ends the call first (`web.extract_timeout`, 120 seconds by default) or the turn is interrupted. A Crawl4AI read is stopped with its Chromium; the browser profile and Crawl4AI's own log and cache live in a temporary folder that webgraft creates and removes, killed read or not. Folders of that kind left by an earlier run (Hermes stopped mid-read, or an older webgraft) are removed when they are more than an hour old, once per Hermes process, at the first browser read; only webgraft's own `webgraft-browser-`, `webgraft-chromium-` and `webgraft-crawl4ai-` folders in the temp folder are touched.
+  - Children start in the plugin's folder, and programs are run by full path (`taskkill`) or looked up in the absolute folders of `PATH` only (`hermes`, `chromium`): on Windows, a program name alone is first looked up in the current folder.
   - These children get a minimal environment (path, home and temp folders, locale, proxy settings, and what each one needs), never Hermes's API keys. `setup` and `status` also run Hermes's own `hermes pm` commands, as Hermes would.
 
 - **Writes:**
@@ -295,6 +297,14 @@ With `show_sources: auto` it then adds nothing and leaves the reply to that plug
 
 ## Limits
 
+- **From Hermes itself (the harness), documented rather than worked around:**
+  - **One rewrite per tool result.** Like replies, a `web_extract` or `web_search` result keeps only the first plugin rewrite (`transform_tool_result`). webgraft rewrites a result only to add its note (URLs left out, a page that could not be read, an empty search); when another plugin rewrites the same result, one of the two rewrites is lost, depending on load order.
+  - **Session ids.** `pre_llm_call` and `transform_llm_output` receive `session_id` only, not the `conversation_id` the plugin guide recommends for per-conversation state. When Hermes compresses a conversation into a new session (`compression.in_place: false`), webgraft starts over: pages read before do not appear under "opened earlier", and `focus` forgets the question until the next message.
+  - **Proxies.** See "Private addresses": Hermes's SSRF guard leaves proxied connections to the proxy; webgraft checks redirect targets itself.
+
+- **From Crawl4AI and Chromium:** only the page the browser ends on is checked (see "Private addresses"). Skip Crawl4AI in `setup` if that matters on your network.
+
+
 - **What is mechanical and what is an estimate.**
   - Mechanical: HTTP errors, document conversion and OCR, `llms.txt`, AI opt-outs, one URL per call, the links of a page, the empty-search note, and the list of opened pages (from tool results).
   - Estimates: bot walls on pages that answer 200 (phrases and headers), `focus` (which passages come first), the browser-view complement (which lines hold missing values), the "opened earlier" pages (shared values), and `language: answer`.
@@ -313,6 +323,8 @@ With `show_sources: auto` it then adds nothing and leaves the reply to that plug
 
 - Hermes keeps `web_extract` results for 20 minutes (`web.cache_ttl_minutes`), across sessions, and a cached page does not go through webgraft again: within that time a page keeps the order `focus` gave it for the first question.
   - Nothing is removed either way, and `web.cache_enabled: false` turns the cache off.
+
+- `focus` cannot tell two sessions apart: Hermes does not say which session a provider read is for. When two sessions ask for the same URL within two minutes, the page is not rearranged for either.
 
 - `focus` matches words, not meaning: a question worded differently from the page (a synonym, another language) may move nothing, and the page then reaches the model as before.
   - The model can still page through the full text with `read_file`.

@@ -110,7 +110,7 @@ def test_a_redirect_to_a_private_address_is_blocked_and_never_reaches_the_browse
     monkeypatch.setattr(ex, "browser_view", _no_browser(calls))
     page = asyncio.run(ex._read_page_itself(None, "https://redirector.example/"))
     # Hermes's origin wording: the site sent us there, so no keyless rescue through an outside service
-    assert page.error == "HTTP 302 from origin: redirects to a private or internal network address (blocked)"
+    assert page.error == "HTTP 302 from origin: redirects to a private or internal network address; webgraft did not follow it"
     assert calls == []
 
 
@@ -339,9 +339,10 @@ def test_a_browser_read_that_times_out_is_stopped_with_its_children(tmp_path, mo
     pid_file = tmp_path / "child.pid"
     runner = tmp_path / "runner.py"
     runner.write_text(
-        "import subprocess, sys, time\n"
+        "import os, subprocess, sys, time\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "open(os.path.join(sys.argv[3], 'profile.lock'), 'w').write('x')\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid) + ' ' + sys.argv[3])\n"
         "time.sleep(60)\n")
     monkeypatch.setattr(ex, "RUNNER", runner)
     monkeypatch.setattr(ex, "crawl4ai_python", lambda: Path(sys.executable))
@@ -349,9 +350,11 @@ def test_a_browser_read_that_times_out_is_stopped_with_its_children(tmp_path, mo
     monkeypatch.setattr(ex, "BROWSER_TIMEOUT", 3)
     view = asyncio.run(ex.browser_view("https://x.example"))
     assert "timed out" in view["error"]
-    child = int(pid_file.read_text())
+    pid, work = pid_file.read_text().split(" ", 1)
+    child = int(pid)
     for _ in range(20):
         if not _alive(child):
             break
         time.sleep(0.25)
     assert not _alive(child)
+    assert not Path(work).exists()  # the plugin removes the work folder even when the runner is killed

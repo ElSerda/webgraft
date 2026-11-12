@@ -36,7 +36,10 @@ peut sont
 _TOKEN = re.compile(r"[^\W_][\w.+-]*", re.UNICODE)
 _OPERATOR = re.compile(r"\b\w+:\S+")
 _lock = threading.Lock()
-_pending: "OrderedDict[str, tuple[list[str], int]]" = OrderedDict()  # url -> (terms, window)
+# url -> (terms, window, session, time). The provider is not told which session a read is for, so
+# an entry is used only when one session alone asked for that URL in the last PENDING_SECONDS.
+_pending: "OrderedDict[str, tuple[list[str] | None, int, str, float]]" = OrderedDict()
+PENDING_SECONDS = 120
 
 
 def _telling(word: str) -> bool:
@@ -192,15 +195,33 @@ def arrange(text: str, terms: list[str], window: int = DEFAULT_WINDOW) -> str:
     return "\n\n".join(parts)
 
 
-def _key(url: str) -> str:
-    """The URL as Hermes passes it to the provider (normalize_url_for_request: IDNA host,
-    percent-encoded path), then without fragment, trailing slash or case in scheme and host."""
+def _normalized(url: str) -> str:
+    """The URL as Hermes hands it to a provider: IDNA host, non-ASCII path and query percent-encoded
+    (what Hermes's normalize_url_for_request does; that helper is not part of the plugin API)."""
+    from urllib.parse import quote, urlsplit, urlunsplit
     try:
-        from tools.url_safety import normalize_url_for_request
-        url = normalize_url_for_request(url or "")
-    except Exception:  # noqa: BLE001 - outside Hermes
-        pass
-    url = (url or "").split("#")[0].strip()
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return url
+    if parts.scheme.lower() not in ("http", "https"):
+        return url
+    userinfo, at, hostport = parts.netloc.rpartition("@")
+    if not hostport.startswith("["):  # an IPv6 literal stays as it is
+        host, colon, port = hostport.partition(":")
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            pass
+        hostport = host + colon + port
+    safe = "/%:@!$&'()*+,;=-._~?"
+    return urlunsplit((parts.scheme, userinfo + at + hostport, quote(parts.path, safe=safe),
+                       quote(parts.query, safe=safe), parts.fragment))
+
+
+def _key(url: str) -> str:
+    """The URL as Hermes passes it to the provider, then without fragment, trailing slash or case
+    in scheme and host."""
+    url = _normalized(url or "").split("#")[0].strip()
     scheme, sep, rest = url.partition("://")
     host, slash, path = rest.partition("/")
     return f"{scheme.lower()}{sep}{host.lower()}{slash}{path}".rstrip("/")
@@ -216,19 +237,31 @@ def hermes_window() -> int:
         return DEFAULT_WINDOW
 
 
-def expect(url: str, terms: list[str], window: int) -> None:
-    """Remember what the next read of `url` is for (set by the pre_tool_call hook)."""
+def expect(url: str, terms: list[str], window: int, session: str = "") -> None:
+    """Remember what the next read of `url` is for (set by the pre_tool_call hook). When another
+    session asked for the same URL a moment ago, the read is arranged for neither: the provider
+    cannot tell the two reads apart."""
     if not url or not terms:
         return
+    import time
+    key, now = _key(url), time.monotonic()
     with _lock:
-        _pending[_key(url)] = (terms, window)
-        _pending.move_to_end(_key(url))
+        earlier = _pending.get(key)
+        if earlier and earlier[2] != session and now - earlier[3] < PENDING_SECONDS:
+            _pending[key] = (None, 0, "*", now)
+        else:
+            _pending[key] = (terms, window, session, now)
+        _pending.move_to_end(key)
         while len(_pending) > MAX_REMEMBERED:
             _pending.popitem(last=False)
 
 
 def take(url: str) -> tuple[list[str], int] | None:
     """What a read of `url` is for, or None: the page is then only cut, never arranged for the
-    question of another call (another session may be reading at the same time)."""
+    question of another call."""
+    import time
     with _lock:
-        return _pending.pop(_key(url), None)
+        plan = _pending.pop(_key(url), None)
+    if not plan or plan[0] is None or time.monotonic() - plan[3] >= PENDING_SECONDS:
+        return None
+    return plan[0], plan[1]

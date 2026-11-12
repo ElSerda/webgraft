@@ -1,11 +1,13 @@
 """Opens one URL with Crawl4AI and prints one JSON line. Runs in webgraft's isolated environment.
 
-    python crawl4ai_runner.py URL CHROMIUM_EXECUTABLE
+    python crawl4ai_runner.py URL CHROMIUM_EXECUTABLE WORK_FOLDER
+
+WORK_FOLDER (made and removed by the plugin) holds the browser profile and Crawl4AI's log and cache.
 
 Crawl4AI drives the Chromium Hermes already installs (`hermes pm install chromium`), started here
 headless with a DevTools port and connected over CDP, so the plugin downloads no browser of its own.
 Kept out of Hermes's environment because Crawl4AI pulls about 35 packages.
-Output: {"success", "status", "title", "final_url", "markdown", "error"}; markdown is Crawl4AI's pruned
+Output: {"success", "status", "title", "final_url", "markdown", "head", "error"}; markdown is Crawl4AI's pruned
 ("fit") markdown, falling back to the full markdown when pruning leaves almost nothing.
 """
 
@@ -17,7 +19,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import warnings
@@ -27,14 +28,16 @@ warnings.filterwarnings("ignore")
 # 60 s cap on this process: the crawl always ends here and this script stops Chromium itself.
 BUDGET = 50
 DEVTOOLS_WAIT = 20
+MAX_MARKDOWN = 400_000  # characters handed back; the plugin reads no more of a page
+MAX_HEAD = 100_000  # of the HTML, for the page's AI opt-out tags (robots / tdm-reservation)
 
 
-def start_chromium(executable: str, deadline: float):
+def start_chromium(executable: str, profile: str, deadline: float):
     """Start Chromium headless on a free DevTools port. Returns (process, ws_url, profile_dir).
 
     Chromium's stderr is read by a thread for the whole run: the DevTools line comes from it, and
     a pipe nobody reads would fill and stall Chromium."""
-    profile = tempfile.mkdtemp(prefix="webgraft-chromium-")
+    os.makedirs(profile, exist_ok=True)
     proc = subprocess.Popen(
         [executable, "--headless=new", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
          f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", "--disable-gpu",
@@ -73,7 +76,9 @@ def kill_tree(proc) -> None:
         return
     if os.name == "nt":
         try:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15)
+            root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or "C:\\Windows"
+            taskkill = os.path.join(root, "System32", "taskkill.exe")  # full path: never one from the cwd
+            subprocess.run([taskkill, "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15)
         except Exception:  # noqa: BLE001 - fall back to the process itself
             pass
     if proc.poll() is None:
@@ -120,30 +125,31 @@ async def crawl(url: str, ws_url: str) -> dict:
     # Where the browser ended, after redirects and script navigation: the plugin checks it before
     # using the text (Chromium does not go through Hermes's SSRF-safe client).
     final = getattr(r, "redirected_url", None) or getattr(r, "url", None) or url
+    html = r.html or ""
+    end = html.lower().find("</head>")
+    head = html[:end if 0 <= end < MAX_HEAD else MAX_HEAD]
+    markdown = fit if len(fit) > 200 else full
     return {"success": True, "status": r.status_code, "title": title, "final_url": str(final),
-            "markdown": fit if len(fit) > 200 else full}
+            "markdown": markdown[:MAX_MARKDOWN], "head": head}
 
 
-def main(url: str, executable: str) -> dict:
+def main(url: str, executable: str, work: str) -> dict:
     # Crawl4AI keeps a log of every URL it visits, and its cache database, under
-    # CRAWL4_AI_BASE_DIRECTORY (default: the home folder). A temporary folder per read, removed
-    # below, so nothing of the pages read stays on disk.
-    base = tempfile.mkdtemp(prefix="webgraft-crawl4ai-")
+    # CRAWL4_AI_BASE_DIRECTORY (default: the home folder): here, the plugin's temporary folder.
+    base = os.path.join(work, "crawl4ai")
+    os.makedirs(base, exist_ok=True)
     os.environ["CRAWL4_AI_BASE_DIRECTORY"] = base
     deadline = time.monotonic() + BUDGET
+    proc, ws_url, profile = start_chromium(executable, os.path.join(work, "profile"), deadline)
     try:
-        proc, ws_url, profile = start_chromium(executable, deadline)
-        try:
-            return asyncio.run(asyncio.wait_for(crawl(url, ws_url), max(1.0, deadline - time.monotonic())))
-        finally:
-            stop_chromium(proc, profile)
+        return asyncio.run(asyncio.wait_for(crawl(url, ws_url), max(1.0, deadline - time.monotonic())))
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        stop_chromium(proc, profile)
 
 
 if __name__ == "__main__":
     try:
-        result = main(sys.argv[1], sys.argv[2])
+        result = main(sys.argv[1], sys.argv[2], sys.argv[3])
     except Exception as exc:  # noqa: BLE001 - reported to the caller as the page's error
         result = {"success": False, "error": f"{exc.__class__.__name__}: {exc}"[:300]}
     sys.stdout.write("\n" + json.dumps(result) + "\n")  # ASCII-only: the console code page varies
