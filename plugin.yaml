@@ -24,10 +24,10 @@ config_schema:
     description: "auto follows Hermes's display.language (English for languages other than en/fr); answer follows the language of the reply"
   show_sources:
     type: str
-    choices: [auto, always, never]
-    default: auto
+    choices: [always, never]
+    default: always
     label: List opened pages
-    description: "auto steps aside when another enabled plugin also rewrites replies (Hermes keeps only one rewrite); always adds the footer; never turns it off"
+    description: "always adds the footer of opened pages; never turns it off. Hermes keeps one rewrite of a reply: with another plugin that rewrites replies, choose which one shows"
   remind:
     type: bool
     default: true
@@ -38,11 +38,6 @@ config_schema:
     default: true
     label: One URL per web_extract call
     description: "A web_extract call that asks for several URLs reads only the first, and its result lists the others: several long pages in one result can exceed a small model's context"
-  focus:
-    type: bool
-    default: true
-    label: Relevant passages first
-    description: "On a page longer than what Hermes shows the model (web.extract_char_limit), moves the passages that mention the question's terms to the top; nothing is removed"
   llms_txt:
     type: bool
     default: true

@@ -113,7 +113,10 @@ async def crawl(url: str, ws_url: str) -> dict:
         markdown_generator=DefaultMarkdownGenerator(content_filter=Pruning()),
         verbose=False,
     )
-    browser = BrowserConfig(cdp_url=ws_url, browser_mode="cdp", headless=True, verbose=False)
+    # Hermes's own User-Agent, passed by the plugin: Crawl4AI would otherwise present itself as a
+    # desktop Chrome on macOS.
+    browser = BrowserConfig(cdp_url=ws_url, browser_mode="cdp", headless=True, verbose=False,
+                            user_agent=os.environ["WEBGRAFT_USER_AGENT"], user_agent_mode="")
     async with AsyncWebCrawler(config=browser) as crawler:
         r = await crawler.arun(url=url, config=run)
     if not r.success:

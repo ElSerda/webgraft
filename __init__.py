@@ -3,8 +3,7 @@
 Hooks only, no extra model call:
   pre_llm_call          starts a fresh record for the turn and adds a short reminder
   pre_tool_call         keeps only the first URL of a web_extract call that asks for several (one
-                        URL per call keeps each page within a small model's context), and notes
-                        the question so a long page has its relevant passages first (focus.py)
+                        URL per call keeps each page within a small model's context)
   transform_tool_result adds to that result the URLs that were left out, so the model can open them,
                         and tells the model to open the next result when no page could be read
   post_tool_call        keeps the text of every page web_extract returned, for the whole session
@@ -21,7 +20,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
-from . import compat, focus, footer, values
+from . import compat, footer, values
 
 # Page text is kept in memory per session, so an answer can rely on a page opened in an
 # earlier turn. Bounded: oldest pages, then oldest sessions, are dropped first. (Hermes's
@@ -32,7 +31,6 @@ MAX_SESSIONS = 20
 _lock = threading.Lock()
 _turns: "OrderedDict[str, dict[str, Any]]" = OrderedDict()  # interrupted turns never reach the footer
 _sessions: "OrderedDict[str, OrderedDict[str, tuple[str, str]]]" = OrderedDict()  # url -> (title, text)
-_questions: "OrderedDict[str, list[str]]" = OrderedDict()  # session -> user message, then search queries
 _ctx = None
 
 
@@ -169,16 +167,12 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
     # An interrupted turn never reaches the transform hook, so its record is dropped here.
     with _lock:
         _turns.pop(session_id, None)
-        _questions[session_id] = [_text_of(user_message)[:2000]]
-        _questions.move_to_end(session_id)
-        while len(_questions) > MAX_SESSIONS:
-            _questions.popitem(last=False)
     parts = []
     if _setting("remind", True):
         footer = FOOTER_SENTENCE if _footer_on() else NO_FOOTER_SENTENCE
         parts.append((URL_REMINDER if _URL.search(_text_of(user_message)) else REMINDER) + " " + footer)
     heading = _footer_in_history(conversation_history)
-    if heading and compat.sources_mode(_setting("show_sources", "auto")) != "never":
+    if heading and compat.sources_mode(_setting("show_sources", "always")) != "never":
         parts.append(FOOTER_NOTE.format(heading=heading))
     return " ".join(parts) or None
 
@@ -237,15 +231,6 @@ def _guard_tool(tool_name: str = "", args: Any = None, session_id: str = "", too
                 _held.popitem(last=False)
         # The first item as the model sent it (string or object): Hermes reads it the same way.
         directive = {"action": "modify", "args": {"urls": _items(args)[:1]}}
-    if urls and _setting("focus", True):
-        with _lock:
-            texts = list(_questions.get(session_id, []))
-        limit = (args or {}).get("char_limit") if isinstance(args, dict) else None
-        try:
-            window = max(2_000, min(int(limit), 500_000)) if limit is not None else focus.hermes_window()
-        except (TypeError, ValueError):
-            window = focus.hermes_window()
-        focus.expect(urls[0], focus.terms_of(*texts), window, session_id)
     return directive
 
 
@@ -318,11 +303,6 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
                  **_: Any) -> None:
     if tool_name not in ("web_search", "web_extract"):
         return
-    if tool_name == "web_search" and isinstance(args, dict) and args.get("query"):
-        with _lock:
-            texts = _questions.setdefault(session_id, [""])
-            texts.append(str(args["query"])[:300])
-            del texts[1:-3]  # the user's message and the last three queries
     pages = _pages(result) if tool_name == "web_extract" else []
     with _lock:
         turn = _turns.setdefault(session_id, {"opened": [], "searched": False, "snippets": ""})
@@ -339,13 +319,10 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
 
 
 def _footer_on() -> bool:
-    """Whether webgraft adds its footer to replies. Hermes keeps only the first plugin rewrite of a
-    reply: with show_sources auto, webgraft leaves it to another rewriter rather than hide its
-    output; always adds it anyway; never turns it off."""
-    mode = compat.sources_mode(_setting("show_sources", "auto"))
-    if mode == "never":
-        return False
-    return not (mode == "auto" and compat.other_reply_rewriters("webgraft", getattr(_ctx, "has_plugin", None)))
+    """Whether webgraft adds its footer to replies (show_sources). Hermes keeps the first non-empty
+    rewrite of a reply when several plugins register transform_llm_output, and gives a plugin no
+    documented way to know which others do: a user who runs another one picks with this setting."""
+    return compat.sources_mode(_setting("show_sources", "always")) != "never"
 
 
 def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> Optional[str]:

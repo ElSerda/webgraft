@@ -89,7 +89,7 @@ def test_an_opted_out_page_is_an_error(monkeypatch):
     monkeypatch.setattr(ex, "_download", fake_download)
     monkeypatch.setattr(ex, "browser_view", no_browser)
     page = asyncio.run(ex._read_page_itself(None, "https://art.example/piece"))
-    assert page.error.startswith("HTTP 200 from origin: the site asks not to be used by AI")
+    assert page.error.startswith("the site asks not to be used by AI")
     ex.setting = lambda key, default: False if key == "respect_ai_optout" else default
     assert asyncio.run(ex._read_page_itself(None, "https://art.example/piece")).error != page.error
 

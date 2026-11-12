@@ -16,7 +16,6 @@ import importlib  # noqa: E402
 gw = load()
 ex = importlib.import_module("webgraft.extract")
 sr = importlib.import_module("webgraft.site_rules")
-fo = importlib.import_module("webgraft.focus")
 footer = importlib.import_module("webgraft.footer")
 values = importlib.import_module("webgraft.values")
 browser = importlib.import_module("webgraft.browser")
@@ -159,11 +158,11 @@ def test_a_browser_view_of_the_same_site_is_merged(monkeypatch):
     assert page.engine == "trafilatura+crawl4ai"
 
 
-def test_a_page_read_by_the_browser_alone_respects_its_ai_opt_out(monkeypatch):
-    view = {"success": True, "status": 200, "markdown": "Boost clock 2617 MHz. " * 30,
+def test_the_browser_copy_of_a_page_respects_its_ai_opt_out(monkeypatch):
+    view = {"success": True, "status": 200, "markdown": "## Specs\n| Memory size | 32 GB |",
             "final_url": "https://site.example/specs",
             "head": '<head><meta name="robots" content="noai"></head>'}
-    page = _page_with_view(monkeypatch, view, status=403)
+    page = _page_with_view(monkeypatch, view)
     assert "asks not to be used by AI" in page.error
 
 
@@ -211,39 +210,6 @@ def test_titles_lose_invisible_and_autolinked_parts():
     assert "evil" not in line and line.endswith(url)
 
 
-# ---------------------------------------------------------------- focus and sessions
-
-
-def test_two_sessions_asking_for_the_same_url_get_no_arrangement():
-    fo._pending.clear()
-    fo.expect("https://shared.example/a", ["alpha"], 9000, "s1")
-    fo.expect("https://shared.example/a", ["beta"], 9000, "s2")
-    assert fo.take("https://shared.example/a") is None
-    fo.expect("https://shared.example/b", ["alpha"], 9000, "s1")
-    fo.expect("https://shared.example/b", ["alpha", "gamma"], 9000, "s1")
-    assert fo.take("https://shared.example/b") == (["alpha", "gamma"], 9000)
-
-
-def test_an_old_expectation_is_not_used(monkeypatch):
-    fo._pending.clear()
-    fo.expect("https://old.example/a", ["alpha"], 9000, "s1")
-    key = fo._key("https://old.example/a")
-    terms, window, session, when = fo._pending[key]
-    fo._pending[key] = (terms, window, session, when - fo.PENDING_SECONDS - 1)
-    assert fo.take("https://old.example/a") is None
-
-
-def test_urls_are_matched_as_hermes_normalizes_them():
-    fo._pending.clear()
-    fo.expect("https://bücher.example/Köln?q=é", ["alpha"], 9000, "s1")
-    assert fo.take("https://xn--bcher-kva.example/K%C3%B6ln?q=%C3%A9") == (["alpha"], 9000)
-
-
-def test_focus_uses_no_private_hermes_helper():
-    source = Path(fo.__file__).read_text(encoding="utf-8")
-    assert "normalize_url_for_request" not in source.replace("normalize_url_for_request does", "")
-
-
 # ---------------------------------------------------------------- multimodal turns
 
 
@@ -254,7 +220,7 @@ def test_a_multimodal_message_counts_its_text_parts_only():
                {"type": "image_url", "image_url": {"url": "https://img.example/cat.png"}}]
     out = ctx.hooks["pre_llm_call"](session_id="m1", user_message=message)
     assert "Open the URL in the user's message" not in out
-    assert gw._questions["m1"] == ["what is in this picture?"]
+    assert gw._text_of(message) == "what is in this picture?"
 
 
 # ---------------------------------------------------------------- setup

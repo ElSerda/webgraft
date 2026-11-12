@@ -37,18 +37,13 @@ def setting(key: str, default):
 
 logger = logging.getLogger(__name__)
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/140.0.0.0 Safari/537.36"
-)
 FETCH_TIMEOUT = 25
 BROWSER_TIMEOUT = 60
 MAX_HTML_BYTES = 15 * 1024 * 1024
 MAX_DOC_BYTES = 50 * 1024 * 1024  # Hermes's own anydoc limit (tools/read_extract.py)
-MAX_CONTENT_CHARS = 30_000  # what one page may hand to the model
 MAX_MARKDOWN_BYTES = 4 * 1024 * 1024  # a page's .md version listed in llms.txt (larger: the HTML is read)
-# What a page is read up to, before focus.arrange() picks what comes first and the cut above.
-READ_CHARS = 400_000
+# What a page is read up to: the text Hermes stores for one page (it windows what the model sees).
+READ_CHARS = 2_000_000
 MAX_COMPLEMENT_CHARS = 8_000
 # Links of the page whose text is in the content, listed under it so the model can open the
 # next page (a product in a listing, an article in an index) without a search. Kept short enough
@@ -100,18 +95,15 @@ class Page:
     links: str = ""  # "- text: url" lines, see page_links()
     requested: str = ""  # the URL web_extract asked for, when `url` differs from it
 
-    def as_result(self, terms: list[str] | None = None, window: int = 0) -> dict:
-        """The provider's dict for this page, cut to MAX_CONTENT_CHARS; with `terms`, a long page
-        has its passages about them first (focus.arrange). The page's links come last.
+    def as_result(self) -> dict:
+        """The provider's dict for this page: the whole text read, then the page's links. Hermes
+        decides what the model sees of it (web.extract_char_limit: a head+tail window, the full text
+        stored for read_file).
 
         `url` is the page actually read, so Hermes re-checks a redirect target (SSRF and website
         policy) as it does for other backends; the requested URL is in metadata.sourceURL."""
-        text = self.content
-        if terms and not self.error:
-            from .focus import arrange
-            text = arrange(text, terms, window or 15_000)
         tail = f"\n\n## Links on this page\n{self.links}" if self.links and not self.error else ""
-        text = text[:MAX_CONTENT_CHARS - len(tail)] + tail
+        text = self.content + tail
         metadata = {"sourceURL": self.requested or self.url}
         if self.engine:
             metadata["engine"] = self.engine
@@ -619,6 +611,9 @@ async def _browser_view(url: str) -> dict:
     python = crawl4ai_python()
     if python is None:
         return {"success": False, "error": "crawl4ai not installed"}
+    user_agent = _user_agent.get()
+    if not user_agent:  # never let Crawl4AI fall back to its own disguised browser user agent
+        return {"success": False, "error": "no user agent from Hermes's client"}
     chromium = browser.recorded()
     if chromium is None:
         return {"success": False, "error": "no Chromium recorded: run `hermes webgraft setup`"}
@@ -633,7 +628,7 @@ async def _browser_view(url: str) -> dict:
         proc = await asyncio.create_subprocess_exec(
             str(python), "-I", str(RUNNER), url, str(chromium), work,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=child_env(CRAWL4AI_NO_CLOUD_NOTICE="1"), cwd=CHILD_CWD,
+            env=child_env(CRAWL4AI_NO_CLOUD_NOTICE="1", WEBGRAFT_USER_AGENT=user_agent), cwd=CHILD_CWD,
             **({} if os.name == "nt" else {"start_new_session": True}),  # its own group, Chromium included
         )
         try:
@@ -704,6 +699,8 @@ async def vet_view(view: dict) -> dict:
 # Status of the last response this task received, redirects included (see _note_status): when the
 # SSRF guard refuses a redirect hop, it says which answer of the site led there.
 _last_status: contextvars.ContextVar[int] = contextvars.ContextVar("webgraft_last_status", default=0)
+# The User-Agent Hermes's client sends, handed to the browser so both identify the same way.
+_user_agent: contextvars.ContextVar[str] = contextvars.ContextVar("webgraft_user_agent", default="")
 
 
 class RedirectBlocked(ValueError):
@@ -743,13 +740,13 @@ async def _download(client, url: str):
 
 
 def _origin(status: int, reason: str) -> str:
-    """A page-level failure in Hermes's origin wording ("HTTP <code> from origin: ...").
-
-    The page answered, but with nothing usable. Hermes does not hand such a page to its keyless
-    rescue, which would fetch it again through an outside service and can return the same wall
-    as content.
+    """A page-level failure. Hermes's `HTTP <code> from origin: ...` form only when the site really
+    answered 400 or more, as Hermes's own backends write it; otherwise the reason alone. What
+    Hermes then does with a failed page (its keyless rescue, `web.keyless_rescue`) is its call.
     """
-    return f"HTTP {status or 200} from origin: {reason}"[:300]
+    if status >= 400:
+        return f"HTTP {status} from origin: {reason}"[:300]
+    return reason[:300]
 
 
 async def read_page(client, url: str) -> Page:
@@ -808,12 +805,8 @@ BLOCKED_ADDRESS = "Blocked: URL targets a private or internal network address"  
 
 
 def _blocked_redirect(status: int) -> str:
-    """The error for a page whose redirect leads to a private address. In Hermes's origin wording
-    when the redirect's status is known: the site itself sent the agent there, so Hermes must not
-    hand the URL to its keyless rescue, an outside service that would fetch it again."""
-    if 300 <= status < 400:
-        return _origin(status, "redirects to a private or internal network address; webgraft did not follow it")
-    return BLOCKED_ADDRESS
+    """The error for a page whose redirect leads to a private address (refused by the SSRF guard)."""
+    return "Blocked: a redirect leads to a private or internal network address; webgraft did not follow it"
 
 
 async def _read_page_itself(client, url: str) -> Page:
@@ -826,7 +819,7 @@ async def _read_page_itself(client, url: str) -> Page:
         status, ctype, body, too_big, response = 0, "", b"", False, None
         fetch_error = f"could not download: {exc.__class__.__name__}: {exc}"[:300]
     else:
-        fetch_error = f"HTTP {status} from origin" if status >= 400 else ""  # Hermes wording: no keyless rescue
+        fetch_error = f"HTTP {status} from origin" if status >= 400 else ""  # the site's own answer
     # Where the download ended, after redirects the SSRF-safe client checked hop by hop.
     final = str(getattr(response, "url", "") or url) if response is not None else url
 
@@ -848,43 +841,38 @@ async def _read_page_itself(client, url: str) -> Page:
             return Page(url, error=_origin(status, f"unreadable document: {exc}"))
         return Page(final, name, text, engine="anydoc", requested=url)
 
-    title, main, html, headers = "", "", "", {}
-    if not fetch_error:
-        html = await asyncio.to_thread(site_rules.decoded, response, body[:MAX_HTML_BYTES])
-        headers = dict(response.headers)
-        if opted_out := _optout(status, headers, html):
-            return Page(url, error=opted_out)
-    # The browser starts once the download is done, on the address it reached: a URL whose
-    # download was refused never reaches Chromium.
-    browser = None if is_document(final, ctype, b"") else asyncio.create_task(browser_view(final))
-    if not fetch_error:
-        title, main = await asyncio.to_thread(html_text, html, final)
-
-    view = await browser if browser else {"success": False}
+    if fetch_error:
+        # The site refused (403, 429...), failed (5xx, 404) or could not be reached: that is its
+        # answer. The browser is not used to get past it.
+        return Page(url, error=fetch_error)
+    html = await asyncio.to_thread(site_rules.decoded, response, body[:MAX_HTML_BYTES])
+    headers = dict(response.headers)
+    if opted_out := _optout(status, headers, html):
+        return Page(url, error=opted_out)
+    title, main = await asyncio.to_thread(html_text, html, final)
+    if reason := looks_blocked(title, main, headers, html):
+        # A bot wall served with 200 is a refusal too: no browser to get through its challenge.
+        return Page(url, title, error=reason)
+    # The browser starts once the page is served and read, on the address it reached: it only
+    # completes a page the site gave (spec tables, pages built by scripts).
+    view = await browser_view(final) if not is_document(final, ctype, b"") else {"success": False}
     view_ok = view.get("success") and int(view.get("status") or 200) < 400
-    if view_ok and not fetch_error and not same_site(final, str(view.get("final_url") or "")):
+    if view_ok and not same_site(final, str(view.get("final_url") or "")):
         # The browser ended on another site than the page downloaded: its text is not this page's,
         # and Hermes's website policy would only ever see the downloaded URL.
         view_ok = False
     if view_ok and (opted_out := _optout(int(view.get("status") or 200), {}, str(view.get("head") or ""))):
         return Page(url, error=opted_out)  # the browser's copy of the page asks not to be used by AI
-    if fetch_error and not view_ok:
-        return Page(url, error=fetch_error)  # 404, 410, 5xx...: the browser saw no better
     browser_md = view.get("markdown", "") if view_ok else ""
     view_title = (view.get("title") or "") if view_ok else ""
-    # Judge each view on its own: a bot wall in one must not pass by riding on the other's text.
     blocked = ""
-    if main and (reason := looks_blocked(title, main, headers, html)):
-        main, blocked = "", reason
     if browser_md and (reason := looks_blocked(view_title, strip_links(browser_md), headers, html)):
-        browser_md, blocked = "", reason
+        browser_md, blocked = "", reason  # the browser met a wall: its view is dropped
     # Off the event loop: on a large page these take a moment, and Hermes's other work must go on.
     content, engine = await asyncio.to_thread(merge, main, browser_md)
     title = title or view_title
     if not content.strip():
         return Page(url, title, error=_origin(status, blocked or "no readable text on the page"))
-    if engine == "crawl4ai" and view.get("final_url"):
-        final = str(view["final_url"])  # all the text is the browser's: name the page it read
     links = await asyncio.to_thread(page_links, html, browser_md, final, content)
     return Page(final, title, content, engine=engine, links=links, requested=url)
 
@@ -903,9 +891,12 @@ def same_site(a: str, b: str) -> bool:
 
 
 async def read_pages(urls: list[str]) -> list[Page]:
-    headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.8,fr;q=0.6"}
+    # No User-Agent of our own: Hermes's client names the agent ("HermesAgent"), and the browser is
+    # given that same value (see _user_agent).
+    headers = {"Accept-Language": "en-US,en;q=0.8,fr;q=0.6"}
     async with http_client(follow_redirects=True, timeout=FETCH_TIMEOUT, headers=headers,
                            event_hooks={"response": [_note_status]}) as client:
+        _user_agent.set(str(client.headers.get("user-agent") or ""))
         return list(await asyncio.gather(*(read_page(client, u) for u in urls)))
 
 

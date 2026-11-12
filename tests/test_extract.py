@@ -96,11 +96,12 @@ def test_unlabeled_number_rows_are_not_added():
     assert "Memory Speed" in extra
 
 
-def test_page_failures_use_hermes_origin_wording():
-    # Hermes skips its keyless rescue for "HTTP <code> from origin" errors.
-    assert ex._origin(200, "error or block page").startswith("HTTP 200 from origin: ")
-    assert ex._origin(0, "x").startswith("HTTP 200 from origin")
-    assert ex._origin(403, "bot wall").startswith("HTTP 403 from origin: ")
+def test_origin_wording_only_when_the_site_answered_an_error():
+    # Hermes's "HTTP <code> from origin" form means the site answered 400 or more; nothing else
+    # borrows it (it would steer Hermes's keyless rescue).
+    assert ex._origin(403, "bot wall") == "HTTP 403 from origin: bot wall"
+    assert ex._origin(200, "error or block page") == "error or block page"
+    assert ex._origin(0, "x") == "x"
 
 
 ARTICLE_HEAD = '<html><head><meta property="og:type" content="article"><title>Error 404</title></head><body><article>'
@@ -163,12 +164,14 @@ def test_links_come_from_the_browser_view_too_and_the_page_itself_is_skipped():
     assert ex.page_links(LISTING_HTML, "", "https://portal.example/plans", "") == ""
 
 
-def test_links_section_is_capped_and_kept_under_the_content_cap():
+def test_the_whole_page_goes_to_hermes_with_the_links_last():
     html = "".join(f'<a href="/p/{i}">Product number {i}</a>' for i in range(100))
     text = " ".join(f"Product number {i}" for i in range(100))
     links = ex.page_links(html, "", "https://shop.example/", text)
     assert len(links.splitlines()) <= ex.MAX_LINKS and len(links) <= ex.MAX_LINKS_CHARS
-    page = ex.Page("https://shop.example/", "Shop", "word " * 10_000, engine="trafilatura", links=links)
+    page = ex.Page("https://shop.example/", "Shop", "word " * 50_000, engine="trafilatura", links=links)
     out = page.as_result()["content"]
-    assert len(out) <= ex.MAX_CONTENT_CHARS and out.endswith(links) and "## Links on this page" in out
+    # No cut of webgraft's own: Hermes windows the page (web.extract_char_limit) and stores the rest
+    assert out.startswith("word " * 50_000) and out.endswith(links) and "## Links on this page" in out
+    assert not hasattr(ex, "MAX_CONTENT_CHARS")
     assert "Links on this page" not in ex.Page("https://shop.example/", error="HTTP 404 from origin", links=links).as_result()["raw_content"]

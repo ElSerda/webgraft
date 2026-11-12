@@ -6,7 +6,7 @@ A Hermes Agent plugin for web answers built from pages that were really read.
 - **Reports HTTP errors and bot walls as errors**, so the model never takes them for content.
 - **Lists the pages the answer really used**, under the answer, with clickable links. Pages are taken from the tool results, never from the model's text, so the list cannot name a page that was not read.
 - **Pushes the model to open pages** instead of answering from search snippets: a bundled skill and a short reminder.
-- **Keeps long pages useful to small models**: one URL per `web_extract` call, and on a page longer than what Hermes shows the model, the passages about the question come first. See [What the model sees of a long page](#what-the-model-sees-of-a-long-page).
+- **Keeps several pages within the model's context**: one URL per `web_extract` call. Long pages are left to Hermes's own window, which `setup` can widen with your consent. See [What the model sees of a long page](#what-the-model-sees-of-a-long-page).
 
 A real run, fully local: Gemma 4 E4B in LM Studio, DuckDuckGo search, pages read by webgraft.
 
@@ -66,7 +66,7 @@ webgraft fixes the first two, pushes against the third, and shows which pages th
    - A page that asks not to be used by AI comes back as an error, not as content: `noai` in the `X-Robots-Tag` header or in a robots meta tag, or the TDM Reservation Protocol (`tdm-reservation: 1`, header or meta tag).
    - `robots.txt` is not read: it addresses crawlers, and webgraft reads only the pages the user's agent asks for.
 
-2. **Download it.** An HTTP error (404, 410, 5xx) is reported as an error, unless a browser can still open the page.
+2. **Download it**, with Hermes's own HTTP client and its User-Agent (`HermesAgent`). An HTTP error (403, 404, 410, 429, 5xx) is the site's answer and is reported as such: webgraft never tries to get past it.
 
 3. **Documents** (PDF, Office, OpenDocument, EPUB, RTF, CSV): Markdown, tables included, with anydoc, the converter Hermes's own `read_file` uses (its `doc-extract` extra, installed by `setup` or on first use).
    - It runs in a separate process stopped after 60 seconds (and, on Linux, limited to 2 GB of address space and run with 4 threads), so a crafted document cannot hang Hermes or take over the machine.
@@ -74,53 +74,48 @@ webgraft fixes the first two, pushes against the third, and shows which pages th
 
    HTML: main text with trafilatura.
 
-4. **With Crawl4AI installed**, the same page is also opened in a headless browser (the Chromium Hermes installs).
+4. **With Crawl4AI installed**, a page the site served (status 200, no bot wall) is also opened in a headless browser (the Chromium Hermes installs), with the same `HermesAgent` User-Agent.
    - Lines of the browser view that hold values missing from the main text, such as spec table rows, are appended under "More values from this page".
    - Pages that trafilatura cannot read, because scripts build them (Vue, React...), use the browser view instead: the browser waits for the page to load, then one more second for its scripts to fetch their data.
+   - The browser only completes what the site served. A page the site refused (403, 429...) or a bot wall is never re-read in the browser: that would be getting past the site's answer.
 
 5. **Errors come from the HTTP status only**: a 404, 410, 403 or 5xx is reported as such.
    - A page that answers 200 is never called an error because of its text, since a table, a price or a blog post can hold "404" or "not found".
    - Bot walls can answer 200, so a 200 page is checked for one: the response headers (Cloudflare marks its challenges with `cf-mitigated: challenge`), then the text, where a challenge page's own phrases ("Just a moment...", "Checking your browser", "Automated bot check") count on a page of any length, and words an article also uses ("captcha", "access denied") only on a short page that does not declare itself an article in its HTML head.
-   - Errors and walls are reported in Hermes's `HTTP <code> from origin: ...` form. Hermes then does not re-fetch them through its keyless rescue (an outside service that can return the same wall as content), and a wall that another backend returns is never listed as a source.
+   - Only a real HTTP error is reported in Hermes's `HTTP <code> from origin` form, as Hermes's own backends write it. Walls, AI opt-outs, unreadable documents and pages without text are reported with their reason alone.
+   - What Hermes does next with a failed page is Hermes's decision: with `web.keyless_rescue: true` (Hermes's default), a call where every page failed is retried through Hermes's keyless free tier, outside services that fetch the page again from their own servers. To keep pages that refused, or asked not to be used by AI, from being fetched that way, set `web.keyless_rescue: false` in `config.yaml`.
+   - A wall that another backend returns as content is never listed as a source.
 
 6. **The page's links whose text is in the content are listed last**, under "Links on this page" (40 at most): the products of a listing, the articles of an index, the sections of a documentation.
    - Extraction keeps a link's text and drops its target, so without this a model that reads a category page sees names it cannot open and searches for their addresses instead.
    - Navigation and footer links, which the extraction already dropped, stay out.
 
-Each page is capped at 30,000 characters, links included.
+The whole text read (up to 2,000,000 characters, what Hermes stores for one page) goes to Hermes, links last. Hermes decides what the model sees of it.
 
 ## What the model sees of a long page
 
-This is a limit of Hermes's `web_extract` that every extraction backend runs into. Small local models and models with a short context feel it most.
+Hermes decides, not webgraft. Small local models and models with a short context feel it most.
 
 ### The window
 
 Hermes shows the model at most `web.extract_char_limit` characters of each page: 15,000 by default, whichever backend read it. On a longer page the model gets the first 75% and the last 25% of that window.
 
-The middle is saved to a file under `HERMES_HOME/cache/web`, with a note that `read_file` can page through it. Small models rarely do. So on a long document the answer is often in the part the model never sees.
+The full text is saved to a file under `HERMES_HOME/cache/web`, with a note telling the model which `read_file` call pages through the rest. Small models rarely do it, so on a long document the answer can sit in the part the model never sees.
 
-A real case, on Hermes 0.22.7 with Ministral 3 3B in LM Studio. The question, asked in French: "According to https://hermes-agent.nousresearch.com/docs/user-guide/configuration, what does Hermes's `web.keyless_rescue` setting do, and what is its default?"
+### Widening it (optional, in `setup`)
 
-That page is 255,000 characters long; the setting is explained 215,000 characters in. With `focus` turned off, the model saw the start and the end of the page and answered (translated):
+`hermes webgraft setup` offers to raise `web.extract_char_limit` to 30,000. It is off unless you say yes (or pass `--char-limit N`).
 
-```
-The setting web.keyless_rescue is not explicitly mentioned in the Hermes Agent documentation [...]
-Default value not found explicitly.
-```
-
-With `focus` on (the default), same model, same page, same question:
-
-```
-web.keyless_rescue active when true: on a failed search or extract call, the single request retries
-using the keyless free-tier backend (round-robin fallback across Exa/Parallel/Firecrawl/Keenable).
-Default value: true.
-```
-
-That is what the documentation says.
+- **What you gain:** the model sees twice as much of a long page inline.
+- **What it costs:**
+  - each page can take about 7,500 tokens of context instead of 3,750;
+  - Hermes spills a tool result over 100,000 characters to disk and shows a short preview instead, with a lower threshold on small-context models ([Tool-Result Spillover Budget](https://hermes-agent.nousresearch.com/docs/user-guide/configuration#tool-result-spillover-budget)). Below 64K tokens of context, a 30,000-character page can end up as a preview, so `setup` does not offer the change when `model.context_length` is set below that;
+  - on a paid model, more input tokens per page.
+- **Undo:** setup records the value it replaced, and `hermes webgraft uninstall` puts it back. To set it by hand instead: `hermes config set web.extract_char_limit 30000`. The model can also ask for more on one call (`char_limit`).
 
 ### Several URLs in one call
 
-Each page gets its own window, but they all land in one tool result. Above a share of the context window (15%, about 19,700 characters with a 32K context), Hermes replaces a whole tool result with a 1,500-character preview, and the model is left with almost nothing.
+Each page gets its own window, but they all land in one tool result. Hermes spills a tool result over 100,000 characters to disk, with a lower threshold on small-context models, and shows the model a short preview plus the file's path for `read_file` ([Tool-Result Spillover Budget](https://hermes-agent.nousresearch.com/docs/user-guide/configuration#tool-result-spillover-budget)). In Hermes 0.23.1 the thresholds are 15% of the context window for one result and 30% for a whole turn's tool output (`tools/budget_config.py`).
 
 ### What webgraft does about it
 
@@ -132,25 +127,13 @@ Each page gets its own window, but they all land in one tool result. Above a sha
 - **An empty search is not an absence.** A `web_search` that returns no result gets a `webgraft_note`: a self-hosted backend (SearXNG) answers nothing when the engines behind it rate-limit it, which several searches sent at once trigger, and Hermes reports that as a successful search with zero results.
   - The note says to search again one query at a time or to open a page that lists the thing, rather than conclude that it does not exist.
 
-- **Relevant passages first.** webgraft knows the question: the user's message and the model's search queries. On a page longer than the window, it moves the passages that mention the question's terms to the top.
-  - Rare terms weigh more than terms found all over the page, tables of contents are skipped, and a table split by a page break stays whole.
-  - A note tells the model this was done, and the rest of the page follows in its original order. Nothing is removed.
-  - The note does not name the question's words: Hermes caches a page for every session for a while.
-  - Pages are cut into passages of about 600 characters where they have no paragraphs, as the text of an HTML page often does.
-  - In the case above, the `keyless_rescue` passage moves from 215,000 characters in to the top of the window.
-  - Setting: `focus`.
-
-- Pages are read up to 400,000 characters and handed to Hermes cut at 30,000 characters, after this reordering.
-
-### What you can do
-
-With a model that has room, raise the window, for example `hermes config set web.extract_char_limit 30000` (two pages then take about 16,000 tokens). Keep the default with a small context.
-
 ### For Hermes
 
-The window is a fixed head and tail. Picking it from the question, as webgraft does, would help every backend. The query is not passed to extract providers today (`extract(urls, **kwargs)`), which is why webgraft reads it from hooks.
+Requests for the Hermes maintainers, so plugins would not have to work around the harness:
 
-The 20-minute extract cache is documented for users ([Result caching](https://hermes-agent.nousresearch.com/docs/user-guide/features/web-search#result-caching)) but not in the web provider plugin guide: a provider is not told that a cache hit can skip it, and the `cached` flag Hermes sets on a hit is dropped before the result reaches plugin hooks. Keeping that flag in the result would let a plugin say, for example, that a listed source was read earlier rather than just now.
+- **Which plugins rewrite replies.** Hermes keeps the first non-empty `transform_llm_output` rewrite and gives a plugin no documented way to know whether another enabled plugin registers that hook. A public query (or a way to append rather than replace) would let a footer plugin step aside or combine instead of asking the user to choose.
+- **Redirect checks behind a proxy.** The security guide promises that redirect chains are re-validated at each hop, but the public `create_ssrf_safe_async_client` leaves proxied hops to the proxy. A public option or helper for that check would replace webgraft's own response hook.
+- **The extract cache.** The 20-minute extract cache is documented for users ([Result caching](https://hermes-agent.nousresearch.com/docs/user-guide/features/web-search#result-caching)) but not in the web provider plugin guide: a provider is not told that a cache hit can skip it, and the `cached` flag Hermes sets on a hit is dropped before the result reaches plugin hooks.
 
 ## Which pages are listed
 
@@ -180,10 +163,11 @@ Then `setup`:
 2. sets `web.extract_backend: webgraft`, and installs Hermes's document converter (`doc-extract`) if missing;
 3. offers **Crawl4AI**, which is optional;
 4. offers **local OCR** for scanned PDFs (RapidOCR), which is optional;
-5. offers to auto-load the bundled skill `webgraft:webgraft` (it tells the model to open pages instead of answering from snippets, one URL per call; about 600 tokens per session);
-6. tests one real page and one missing page.
+5. offers to raise Hermes's `web.extract_char_limit` to 30,000 (off unless you say yes; see [Widening it](#widening-it-optional-in-setup));
+6. offers to auto-load the bundled skill `webgraft:webgraft` (it tells the model to open pages instead of answering from snippets, one URL per call; about 600 tokens per session);
+7. tests one real page and one missing page.
 
-Non-interactive: `hermes webgraft setup --yes --search ddgs --crawl4ai --ocr --skill`.
+Non-interactive: `hermes webgraft setup --yes --search ddgs --crawl4ai --ocr --skill` (add `--char-limit 30000` to raise the window).
 
 Check at any time with `hermes webgraft status`.
 
@@ -194,7 +178,7 @@ hermes webgraft uninstall
 hermes plugins remove webgraft
 ```
 
-`uninstall` puts back the web backends `setup` replaced (it records them in `HERMES_HOME/plugin-data/webgraft`), removes the skill from `skills.auto_load`, and deletes the Crawl4AI and OCR environments. Hermes's Chromium stays: it belongs to Hermes.
+`uninstall` puts back the web backends and the `web.extract_char_limit` that `setup` replaced (it records them in `HERMES_HOME/plugin-data/webgraft`), removes the skill from `skills.auto_load`, and deletes the Crawl4AI and OCR environments. Hermes's Chromium stays: it belongs to Hermes.
 
 `hermes plugins remove` alone would leave `web.extract_backend` pointing at a backend that no longer exists.
 
@@ -202,7 +186,7 @@ hermes plugins remove webgraft
 
 Crawl4AI pulls about 35 packages, so it is not installed into Hermes's environment: `setup` creates a separate one with `hermes pm` (`HERMES_HOME/environments/webgraft-crawl4ai`).
 
-webgraft downloads no browser. Crawl4AI drives the Chromium that Hermes's own browser tool uses, found the way Hermes finds it:
+webgraft downloads no browser. Crawl4AI drives the Chromium that Hermes's own browser tool uses, found in the order Hermes documents ([Browser, "Which Chromium"](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser#local-chromium-default)). Hermes has no public function for it, so webgraft follows that order itself; on a test machine both pick the same executable:
 
 - `browser.executable_path` in `config.yaml`,
 - then the Chromium installed by `hermes pm install chromium` (pinned and checked by Hermes),
@@ -230,10 +214,9 @@ Under Settings → Plugins in Hermes Desktop, or `plugins.entries.webgraft.setti
 | Key | Default | Meaning |
 |---|---|---|
 | `language` | `auto` | Footer language: `auto` (Hermes's `display.language`; English for languages other than en/fr), `answer` (the reply's language), `en` or `fr` |
-| `show_sources` | `auto` | `auto`: list the opened pages, unless another plugin also rewrites replies (see below). `always`: list them anyway. `never`: no list |
+| `show_sources` | `always` | `always`: list the opened pages under the answer. `never`: no list (with another plugin that rewrites replies, see below). Older values: `auto` means `always` |
 | `remind` | `true` | Add a short note to each user message (about 110 tokens), marked as a note and not the request: search snippets are not sources, open the pages, and open the pages a multi-URL call left out. When the message holds a URL, the note asks to open that page instead of searching |
 | `one_url_per_call` | `true` | A `web_extract` call that asks for several URLs reads only the first; the result lists the others |
-| `focus` | `true` | On a page longer than what Hermes shows the model, put the passages about the question first (nothing is removed) |
 | `llms_txt` | `true` | When the site's `llms.txt` lists a Markdown version of the page, read that instead of the HTML |
 | `respect_ai_optout` | `true` | A page that asks not to be used by AI (`noai`, `tdm-reservation: 1`) comes back as an error |
 
@@ -242,10 +225,10 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
 ## What it does, for review
 
 - **Hooks:**
-  - `pre_llm_call` (starts a record for the turn, notes the user's message for `focus` and, unless `remind` is off, appends the short reminder to the user message)
-  - `pre_tool_call` (only for `web_extract`: keeps the first URL of a call that asks for several when `one_url_per_call` is on, and notes which question the page is read for)
+  - `pre_llm_call` (starts a record for the turn and, unless `remind` is off, appends the short reminder to the user message)
+  - `pre_tool_call` (only for `web_extract`: keeps the first URL of a call that asks for several when `one_url_per_call` is on)
   - `transform_tool_result` (adds the URLs left out to the result of such a call, and a note to a `web_search` result that holds no result)
-  - `post_tool_call` (keeps the text of `web_extract` results and the `web_search` query)
+  - `post_tool_call` (keeps the text of `web_extract` results and the snippets of `web_search` results)
   - `transform_llm_output` (appends the footer; the answer itself is not changed, so a streamed answer is not printed twice)
 
 - **Web provider:** `webgraft`, extract only.
@@ -254,7 +237,7 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
 
 - **Skill:** `webgraft:webgraft`, read-only, loaded only if you auto-load it or call it.
 
-- **Network:** downloads the URLs the agent asks `web_extract` to read, directly from this machine with a desktop Chrome user agent (sites that refuse unknown clients serve it the page; it does not name Hermes or webgraft), and, with `llms_txt` on, each site's `/llms.txt` once per hour (plus the `.md` version of a page it lists).
+- **Network:** downloads the URLs the agent asks `web_extract` to read, directly from this machine, with Hermes's HTTP client and its User-Agent (`HermesAgent`, the browser uses the same), and, with `llms_txt` on, each site's `/llms.txt` once per hour (plus the `.md` version of a page it lists).
   - `setup` also checks the SearXNG URL you give it and reads two test pages on iana.org; with OCR chosen, RapidOCR downloads its models once from modelscope.cn (SHA-256 checked).
   - Crawl4AI's browser loads the same URLs, runs their scripts and loads their page assets.
 
@@ -274,40 +257,36 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
   - These children get a minimal environment (path, home and temp folders, locale, proxy settings, and what each one needs), never Hermes's API keys. `setup` and `status` also run Hermes's own `hermes pm` commands, as Hermes would.
 
 - **Writes:**
-  - `web.search_backend`, `web.extract_backend`, `skills.auto_load` and, for SearXNG, `SEARXNG_URL` in `.env`, all through Hermes's own config functions and only during `setup` and `uninstall`;
+  - `web.search_backend`, `web.extract_backend`, `skills.auto_load`, `web.extract_char_limit` (only if you accept it) and, for SearXNG, `SEARXNG_URL` in `.env`, all through Hermes's own config functions and only during `setup` and `uninstall`;
   - the values `setup` replaced, in `HERMES_HOME/plugin-data/webgraft/previous.json`;
   - the Chromium path, in `browser.json` next to it.
 
-  Nothing else is stored: page text lives in memory only, for at most 30 pages per conversation and 20 conversations, and so do the last user message and search queries of each conversation (for `focus`) and which sites publish an `llms.txt` (for an hour); all of it is gone when Hermes stops.
+  Nothing else is stored: page text lives in memory only, for at most 30 pages per conversation and 20 conversations, and so does which sites publish an `llms.txt` (for an hour); all of it is gone when Hermes stops.
 
 - **Reads:**
-  - the `plugin.yaml` of other installed plugins (`name` and `provides_hooks` only, no YAML library needed), to find reply rewriters;
-  - `web.extract_char_limit` and `display.language` in `config.yaml`;
+  - `web.extract_char_limit` (for `setup` and `status`) and `display.language` in `config.yaml`;
   - `hermes pm env chromium` and `browser.executable_path`, during `setup`, to find Hermes's Chromium.
 
 - **No telemetry**, no credentials read, no self-update.
 
 ## Other plugins that rewrite replies
 
-Hermes runs every plugin's `transform_llm_output` hook but keeps only the first rewrite of a reply, so two plugins that append a footer hide one another without warning.
+Hermes runs every plugin's `transform_llm_output` hook but keeps the first non-empty rewrite of a reply ([hooks guide](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks#transform_llm_output)), so two plugins that append a footer hide one another.
 
-webgraft looks for any other enabled plugin that declares that hook: it reads the `plugin.yaml` of the plugins installed in `HERMES_HOME/plugins` (the catalog requires declared hooks to match what a plugin registers) and asks Hermes whether each one is enabled (`ctx.has_plugin`). Plugins installed with pip have no manifest there and are not seen.
-
-With `show_sources: auto` it then adds nothing and leaves the reply to that plugin. `hermes webgraft status` names the plugin. Set `show_sources: always` to show webgraft's footer instead, or disable the other plugin. Page reading and the reminder keep working either way.
+Hermes gives a plugin no documented way to know which other plugins register that hook, so webgraft does not guess. If you run another plugin that rewrites replies, choose which one shows: `show_sources: never` turns webgraft's footer off (page reading and the reminder keep working), or disable the other plugin. A public way to ask is among the [requests for Hermes](#for-hermes).
 
 ## Limits
 
 - **From Hermes itself (the harness), documented rather than worked around:**
   - **One rewrite per tool result.** Like replies, a `web_extract` or `web_search` result keeps only the first plugin rewrite (`transform_tool_result`). webgraft rewrites a result only to add its note (URLs left out, a page that could not be read, an empty search); when another plugin rewrites the same result, one of the two rewrites is lost, depending on load order.
-  - **Session ids.** `pre_llm_call` and `transform_llm_output` receive `session_id` only, not the `conversation_id` the plugin guide recommends for per-conversation state. When Hermes compresses a conversation into a new session (`compression.in_place: false`), webgraft starts over: pages read before do not appear under "opened earlier", and `focus` forgets the question until the next message.
-  - **Proxies.** See "Private addresses": Hermes's SSRF guard leaves proxied connections to the proxy; webgraft checks redirect targets itself.
+  - **Session ids.** `pre_llm_call` and `transform_llm_output` receive `session_id` only, not the `conversation_id` the plugin guide recommends for per-conversation state. When Hermes compresses a conversation into a new session (`compression.in_place: false`), webgraft starts over: pages read before do not appear under "opened earlier".
+  - **Proxies.** Hermes's security guide says redirect chains are re-validated at each hop, but its public SSRF-safe client leaves proxied hops to the proxy. webgraft checks redirect targets itself (see "Private addresses"), and asks Hermes for a public way ([requests for Hermes](#for-hermes)).
 
-- **From Crawl4AI and Chromium:** only the page the browser ends on is checked (see "Private addresses"). Skip Crawl4AI in `setup` if that matters on your network.
-
+- **From Crawl4AI and Chromium:** only the page the browser ends on is checked (see "Private addresses"). Hermes takes the same stance for its own local browser: with a local terminal backend it "can open `localhost` and LAN addresses" and "reaches nothing the terminal can't" ([Browser](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser#local-chromium-default)). Skip Crawl4AI in `setup` if that matters on your network.
 
 - **What is mechanical and what is an estimate.**
   - Mechanical: HTTP errors, document conversion and OCR, `llms.txt`, AI opt-outs, one URL per call, the links of a page, the empty-search note, and the list of opened pages (from tool results).
-  - Estimates: bot walls on pages that answer 200 (phrases and headers), `focus` (which passages come first), the browser-view complement (which lines hold missing values), the "opened earlier" pages (shared values), and `language: answer`.
+  - Estimates: bot walls on pages that answer 200 (phrases and headers), the browser-view complement (which lines hold missing values), the "opened earlier" pages (shared values), and `language: answer`.
   - Each estimate is additive, shown as such (a note, a heading), and can be turned off, except bot-wall detection, which removes a page and says why.
 
 - The footer says which pages the answer was built from. It does not check that each sentence of the answer matches them: that would take another model call per reply and still not be reliable.
@@ -321,13 +300,7 @@ With `show_sources: auto` it then adds nothing and leaves the reply to that plug
   - The result is "Blocked: URL targets a private or internal network address".
   - To read pages on your own LAN, set `security.allow_private_urls: true` in Hermes's `config.yaml`; cloud metadata addresses stay blocked.
 
-- Hermes keeps `web_extract` results for 20 minutes (`web.cache_ttl_minutes`), across sessions, and a cached page does not go through webgraft again: within that time a page keeps the order `focus` gave it for the first question.
-  - Nothing is removed either way, and `web.cache_enabled: false` turns the cache off.
-
-- `focus` cannot tell two sessions apart: Hermes does not say which session a provider read is for. When two sessions ask for the same URL within two minutes, the page is not rearranged for either.
-
-- `focus` matches words, not meaning: a question worded differently from the page (a synonym, another language) may move nothing, and the page then reaches the model as before.
-  - The model can still page through the full text with `read_file`.
+- Hermes keeps `web_extract` results for 20 minutes (`web.cache_ttl_minutes`), across sessions, and a cached page does not go through webgraft again. `web.cache_enabled: false` turns the cache off.
 
 ## Dependencies
 

@@ -109,14 +109,8 @@ def test_a_redirect_to_a_private_address_is_blocked_and_never_reaches_the_browse
     monkeypatch.setattr(ex, "_download", download)
     monkeypatch.setattr(ex, "browser_view", _no_browser(calls))
     page = asyncio.run(ex._read_page_itself(None, "https://redirector.example/"))
-    # Hermes's origin wording: the site sent us there, so no keyless rescue through an outside service
-    assert page.error == "HTTP 302 from origin: redirects to a private or internal network address; webgraft did not follow it"
+    assert page.error == "Blocked: a redirect leads to a private or internal network address; webgraft did not follow it"
     assert calls == []
-
-
-def test_a_blocked_fetch_without_a_redirect_uses_hermes_blocked_wording():
-    assert ex._blocked_redirect(0) == ex.BLOCKED_ADDRESS
-    assert ex._blocked_redirect(307).startswith("HTTP 307 from origin: ")
 
 
 class StreamResponse:
@@ -201,18 +195,90 @@ def test_a_browser_view_that_does_not_say_where_it_ended_is_dropped(monkeypatch)
     assert asyncio.run(ex.vet_view({"success": True, "markdown": "page"}))["success"] is False
 
 
-def test_a_page_read_only_by_the_browser_is_named_by_its_final_url(monkeypatch):
+def test_a_refused_page_is_never_read_by_the_browser_instead(monkeypatch):
+    calls = []
+
     async def download(client, url):
         return Response(url, status=403, body="Forbidden"), b"Forbidden", False
 
-    async def view(url, slots=None):
+    async def view(url):
+        calls.append(url)
         return {"success": True, "status": 200, "title": "Specs", "markdown": "Boost clock 2617 MHz. " * 30,
-                "final_url": "https://www.public.example/specs"}
+                "final_url": url}
     monkeypatch.setattr(ex, "_download", download)
     monkeypatch.setattr(ex, "browser_view", view)
     page = asyncio.run(ex._read_page_itself(None, "https://public.example/specs"))
-    assert (page.engine, page.url, page.requested) == ("crawl4ai", "https://www.public.example/specs",
-                                                        "https://public.example/specs")
+    assert page.error == "HTTP 403 from origin" and calls == []
+
+
+def test_a_bot_wall_served_with_200_is_never_passed_with_the_browser(monkeypatch):
+    calls = []
+    wall = "<html><head><title>Just a moment...</title></head><body>Checking your browser</body></html>"
+
+    async def download(client, url):
+        return Response(url, body=wall), wall.encode("utf-8"), False
+
+    async def view(url):
+        calls.append(url)
+        return {"success": True, "status": 200, "markdown": "Boost clock 2617 MHz. " * 30, "final_url": url}
+    monkeypatch.setattr(ex, "_download", download)
+    monkeypatch.setattr(ex, "browser_view", view)
+    page = asyncio.run(ex._read_page_itself(None, "https://walled.example/specs"))
+    assert page.error.startswith("bot wall") and calls == []
+
+
+def test_a_script_built_page_is_completed_by_the_browser(monkeypatch):
+    shell = "<html><head><title>App</title></head><body><div id='app'></div></body></html>"
+
+    async def download(client, url):
+        return Response(url, body=shell), shell.encode("utf-8"), False
+
+    async def view(url):
+        return {"success": True, "status": 200, "title": "Specs", "markdown": "Boost clock 2617 MHz. " * 30,
+                "final_url": url}
+    monkeypatch.setattr(ex, "_download", download)
+    monkeypatch.setattr(ex, "browser_view", view)
+    page = asyncio.run(ex._read_page_itself(None, "https://spa.example/specs"))
+    assert page.engine == "crawl4ai" and "2617 MHz" in page.content
+
+
+# ---------------------------------------------------------------- user agent: Hermes's own
+
+
+def test_pages_are_fetched_with_hermes_user_agent_and_the_browser_gets_the_same(monkeypatch):
+    seen = {}
+
+    class Client:
+        def __init__(self, **kwargs):
+            seen["headers"] = kwargs.get("headers") or {}
+            self.headers = {"user-agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def read_page(client, url):
+        seen["browser_ua"] = ex._user_agent.get()
+        return ex.Page(url, error="x")
+    monkeypatch.setattr(ex, "http_client", lambda **kw: Client(**kw))
+    monkeypatch.setattr(ex, "read_page", read_page)
+    asyncio.run(ex.read_pages(["https://a.example"]))
+    assert not any(k.lower() == "user-agent" for k in seen["headers"])
+    assert seen["browser_ua"] == "Mozilla/5.0 (compatible; HermesAgent/1.0)"
+    assert not hasattr(ex, "USER_AGENT")
+
+
+def test_the_browser_is_not_started_without_hermes_user_agent(monkeypatch):
+    monkeypatch.setattr(ex, "crawl4ai_python", lambda: Path(sys.executable))
+    view = asyncio.run(ex._browser_view("https://a.example"))
+    assert view["success"] is False and "user agent" in view["error"]
+
+
+def test_the_runner_sets_the_user_agent_it_is_given():
+    source = (Path(ex.__file__).parent / "crawl4ai_runner.py").read_text(encoding="utf-8")
+    assert 'user_agent=os.environ["WEBGRAFT_USER_AGENT"]' in source
 
 
 # ---------------------------------------------------------------- 3. child environment
@@ -243,31 +309,6 @@ def test_the_document_reader_does_not_see_provider_keys(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- 4. manifests without PyYAML
 
 
-def test_manifests_are_read_without_a_yaml_library():
-    block = 'name: "other"   # a comment\nversion: 1.0\nprovides_hooks:\n  - pre_llm_call\n  - transform_llm_output\nconfig_schema:\n  name:\n    type: str\n'
-    assert compat.read_manifest(block) == {"name": "other", "provides_hooks": ["pre_llm_call", "transform_llm_output"]}
-    flow = "name: 'flowy'\nhooks: [post_tool_call, transform_llm_output]\n"
-    assert compat.read_manifest(flow) == {"name": "flowy", "hooks": ["post_tool_call", "transform_llm_output"]}
-
-
-def test_our_own_manifest_is_read():
-    data = compat.read_manifest((Path(__file__).resolve().parents[1] / "plugin.yaml").read_text(encoding="utf-8"))
-    assert data["name"] == "webgraft" and compat.HOOK in data["provides_hooks"]
-
-
-def test_another_enabled_rewriter_is_found(tmp_path, monkeypatch):
-    for name, hooks in (("webgraft", "[transform_llm_output]"), ("other", "\n  - transform_llm_output"),
-                        ("quiet", "[pre_llm_call]")):
-        folder = tmp_path / "plugins" / name
-        folder.mkdir(parents=True)
-        (folder / "plugin.yaml").write_text(f"name: {name}\nprovides_hooks: {hooks}\n")
-    constants = types.ModuleType("hermes_constants")
-    constants.get_hermes_home = lambda: tmp_path
-    monkeypatch.setitem(sys.modules, "hermes_constants", constants)
-    assert compat.other_reply_rewriters("webgraft", lambda name: True) == ["other"]
-    assert compat.other_reply_rewriters("webgraft", lambda name: name != "other") == []
-
-
 # ---------------------------------------------------------------- crafted pages stay fast
 
 
@@ -292,23 +333,6 @@ def test_unclosed_tags_and_brackets_stay_fast():
     sr = importlib.import_module("webgraft.site_rules")
     assert _seconds(sr.parse_llms_txt, "# x\n" + "[a" * 50_000, "https://x.example") < 2
     assert _seconds(sr.ai_optout, {}, "<meta " * 15_000) < 2
-
-
-def test_a_long_page_note_does_not_name_the_question_words():
-    fo = importlib.import_module("webgraft.focus")
-    blocks = [f"Paragraph {i} about general things and more general things." * 3 for i in range(400)]
-    blocks[300] = "The zyxquant plan costs 200 dollars a month and includes zyxquant support."
-    text = "\n\n".join(blocks)
-    arranged = fo.arrange(text, ["zyxquant"], 15_000)
-    assert arranged != text and "passages about the question come first" in arranged
-    assert "zyxquant" not in arranged.split("come first")[0]
-
-
-def test_a_page_read_without_a_matching_call_is_not_arranged_for_another_question():
-    fo = importlib.import_module("webgraft.focus")
-    fo.expect("https://one.example/a", ["secret"], 9000)
-    assert fo.take("https://other.example/b") is None
-    assert fo.take("https://one.example/a") == (["secret"], 9000)
 
 
 def test_a_dns_failure_is_not_called_a_private_address():
@@ -348,7 +372,11 @@ def test_a_browser_read_that_times_out_is_stopped_with_its_children(tmp_path, mo
     monkeypatch.setattr(ex, "crawl4ai_python", lambda: Path(sys.executable))
     monkeypatch.setattr(ex.browser, "recorded", lambda: Path("chromium"))
     monkeypatch.setattr(ex, "BROWSER_TIMEOUT", 3)
-    view = asyncio.run(ex.browser_view("https://x.example"))
+    token = ex._user_agent.set("Mozilla/5.0 (compatible; HermesAgent/1.0)")
+    try:
+        view = asyncio.run(ex.browser_view("https://x.example"))
+    finally:
+        ex._user_agent.reset(token)
     assert "timed out" in view["error"]
     pid, work = pid_file.read_text().split(" ", 1)
     child = int(pid)

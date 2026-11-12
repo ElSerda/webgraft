@@ -190,18 +190,19 @@ def test_footer_can_follow_the_answer_language():
     assert "Sources (opened pages):" in out
 
 
-def test_steps_aside_for_another_reply_rewriter(monkeypatch):
-    monkeypatch.setattr(gw.compat, "other_reply_rewriters", lambda own, has_plugin: ["other-footer"])
-    ctx = setup()
-    assert run_turn(ctx, "La formule Plus coûte 20 $.", [("web_extract", extract_result(PAGE))]) is None
-    ctx = setup({"show_sources": "always"})
+def test_other_plugins_are_not_guessed_at_the_user_chooses():
+    # Hermes gives no documented way to know which plugins rewrite replies: no detection.
+    assert not hasattr(gw.compat, "other_reply_rewriters") and not hasattr(gw.compat, "read_manifest")
+    ctx = setup()  # the default lists the pages
+    assert "portal.example" in run_turn(ctx, "La formule Plus coûte 20 $.", [("web_extract", extract_result(PAGE))])
+    ctx = setup({"show_sources": "auto"})  # an older value: same as always
     assert "portal.example" in run_turn(ctx, "La formule Plus coûte 20 $.", [("web_extract", extract_result(PAGE))])
 
 
 def test_sources_mode_values():
     m = gw.compat.sources_mode
-    assert [m(True), m(False), m("on"), m("off"), m("always"), m("never"), m(None), m("weird")] == [
-        "auto", "never", "always", "never", "always", "never", "auto", "auto"]
+    assert [m(True), m(False), m("on"), m("off"), m("always"), m("never"), m(None), m("auto"), m("weird")] == [
+        "always", "never", "always", "never", "always", "never", "always", "always", "always"]
 
 
 def test_never_turns_the_footer_off():

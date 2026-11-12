@@ -5,8 +5,9 @@ setup walks through what webgraft needs and writes the Hermes config:
   2. web_extract on webgraft;
   3. optional Crawl4AI, in its own environment, driving the Chromium Hermes installs;
   4. optional local OCR for scanned PDFs (RapidOCR, no language model);
-  5. auto-loading the bundled research skill;
-  6. a live test: one real page, one 404.
+  5. optionally raising Hermes's web.extract_char_limit (its value is recorded and put back by uninstall);
+  6. auto-loading the bundled research skill;
+  7. a live test: one real page, one 404.
 Every step is shown before it runs. Nothing is installed without a yes, or the matching flag.
 """
 
@@ -115,6 +116,7 @@ def state() -> dict:
         "crawl4ai_python": c4ai,
         "chromium": browser.recorded(),
         "ocr_python": extract.ocr_python(),
+        "char_limit": web.get("extract_char_limit"),
     }
 
 
@@ -148,12 +150,9 @@ def print_state(s: dict, title: str = "webgraft status") -> None:
         ok("OCR                RapidOCR installed (scanned PDFs are read locally)")
     else:
         warn("OCR                not installed (scanned PDFs come back as errors)")
-    others = compat.other_reply_rewriters("webgraft", getattr(_ctx, "has_plugin", None))
-    if others:
-        verb = "also rewrites" if len(others) == 1 else "also rewrite"
-        warn(f"Reply rewriters    {', '.join(others)} {verb} replies, and Hermes keeps only one rewrite.")
-        info("webgraft leaves the reply to them (show_sources: auto). Set it to `always` to show its")
-        info("footer anyway, or turn the other plugin off: `hermes plugins disable <name>`.")
+    limit = s.get("char_limit")
+    ok(f"Page window        {limit if limit is not None else HERMES_CHAR_LIMIT} characters per page"
+       + ("" if limit is not None else " (Hermes's default)"))
 
 
 # ---------------------------------------------------------------- asking
@@ -210,7 +209,10 @@ def _confirm(question: str, default: bool, interactive: bool, description: str =
 
 PLUGIN_NAME = "webgraft"
 _ctx = None
-RESTORED_KEYS = ("web.search_backend", "web.extract_backend")
+RESTORED_KEYS = ("web.search_backend", "web.extract_backend", "web.extract_char_limit")
+HERMES_CHAR_LIMIT = 15_000  # Hermes's default web.extract_char_limit (web search guide)
+SUGGESTED_CHAR_LIMIT = 30_000
+MIN_CONTEXT_FOR_SUGGESTION = 65_536  # tokens; below it a 30,000-character page can be spilled to a preview
 
 
 def _data_dir():
@@ -453,8 +455,44 @@ def step_ocr(args, s: dict, interactive: bool) -> None:
         error("The OCR models did not download; OCR stays off until they do. Run setup again.")
 
 
+def step_char_limit(args, s: dict, interactive: bool) -> None:
+    header("5. Long pages (optional)")
+    current = s.get("char_limit")
+    shown = current if current is not None else HERMES_CHAR_LIMIT
+    info(f"Hermes shows the model at most web.extract_char_limit characters of each page: now {shown}.")
+    info("On a longer page the model gets the start and the end; the full text is saved and the")
+    info("model can page through it with read_file, which small models rarely do.")
+    info(f"Raising it to {SUGGESTED_CHAR_LIMIT} lets the model see twice as much of a long page. The cost:")
+    info(f"  - each page can take up to about {SUGGESTED_CHAR_LIMIT // 4:,} tokens of context instead of {HERMES_CHAR_LIMIT // 4:,};")
+    info("  - Hermes spills a tool result over 100,000 characters to disk and shows the model a short")
+    info("    preview instead, with a lower threshold on small-context models: on a model with less")
+    info(f"    than {MIN_CONTEXT_FOR_SUGGESTION // 1024}K tokens of context, a {SUGGESTED_CHAR_LIMIT}-character page can end up as a preview;")
+    info("  - on a paid model, more input tokens per page.")
+    info("webgraft records the current value and `hermes webgraft uninstall` puts it back.")
+    context = _config_value("model.context_length")
+    small = isinstance(context, int) and 0 < context < MIN_CONTEXT_FOR_SUGGESTION
+    if small:
+        warn(f"model.context_length is {context}: keep Hermes's default window on this model.")
+    if args.char_limit is False:
+        warn("Skipped (--no-char-limit).")
+        return
+    wanted = args.char_limit
+    if wanted is None:
+        if current is not None and int(current) >= SUGGESTED_CHAR_LIMIT:
+            ok(f"Already {current}: unchanged")
+            return
+        if small or not _confirm(f"Raise web.extract_char_limit to {SUGGESTED_CHAR_LIMIT}?", False, interactive,
+                        f"Shows the model up to {SUGGESTED_CHAR_LIMIT} characters of each page instead of {shown}."):
+            warn(f"Unchanged ({shown}). Run setup again, or set web.extract_char_limit yourself.")
+            return
+        wanted = SUGGESTED_CHAR_LIMIT
+    wanted = max(2_000, min(int(wanted), 500_000))  # Hermes's own bounds
+    _set("web.extract_char_limit", str(wanted))
+    ok(f"web.extract_char_limit set to {wanted}")
+
+
 def step_skill(args, interactive: bool) -> None:
-    header("5. Research skill")
+    header("6. Research skill")
     info(f"{SKILL} tells the model to open pages instead of answering from search snippets,")
     info("one URL per web_extract call. Auto-loading puts it in every new session (about 600 tokens).")
     current = ((_config().get("skills") or {}).get("auto_load")) or []
@@ -476,7 +514,7 @@ def step_skill(args, interactive: bool) -> None:
 
 
 def step_test() -> bool:
-    header("6. Test")
+    header("7. Test")
     page, missing = asyncio.run(extract.read_pages([TEST_PAGE, TEST_MISSING]))
     good = bool(page.content) and not page.error
     if good:
@@ -567,6 +605,11 @@ def _setup_parser(parser) -> None:
     oc = setup.add_mutually_exclusive_group()
     oc.add_argument("--ocr", dest="ocr", action="store_true", default=None, help="Install local OCR for scanned PDFs")
     oc.add_argument("--no-ocr", dest="ocr", action="store_false", help="Do not install local OCR")
+    cl = setup.add_mutually_exclusive_group()
+    cl.add_argument("--char-limit", dest="char_limit", type=int, default=None, metavar="N",
+                    help=f"Set web.extract_char_limit to N (suggested {SUGGESTED_CHAR_LIMIT}); restored by uninstall")
+    cl.add_argument("--no-char-limit", dest="char_limit", action="store_false",
+                    help="Leave web.extract_char_limit as it is")
     sk = setup.add_mutually_exclusive_group()
     sk.add_argument("--skill", dest="skill", action="store_true", default=None, help="Auto-load the research skill")
     sk.add_argument("--no-skill", dest="skill", action="store_false", help="Do not auto-load the research skill")
@@ -599,6 +642,7 @@ def handle(args) -> int:
     step_extract(s)
     step_crawl4ai(args, s, interactive)
     step_ocr(args, s, interactive)
+    step_char_limit(args, s, interactive)
     step_skill(args, interactive)
     passed = step_test()
     print_state(state(), "Saved settings")  # what was really saved, so a skipped step shows here
@@ -609,7 +653,7 @@ def handle(args) -> int:
 
 def register(ctx) -> None:
     global _ctx
-    _ctx = ctx  # for ctx.has_plugin in status
+    _ctx = ctx
     ctx.register_cli_command(
         name="webgraft",
         help="Set up and check webgraft (search, page reading, Crawl4AI)",
