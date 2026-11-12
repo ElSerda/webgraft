@@ -48,7 +48,7 @@ config_schema:
     choices: [ask, block, off]
     default: ask
     label: Guard tools after web content
-    description: "A web page can hold instructions aimed at the assistant. Once the conversation has read web content, tools that are not read-only (terminal, code, browser, file writes, messages...) go to Hermes's approval prompt (ask; refused where nobody can answer, such as -Q or cron) or are refused (block). Under --yolo or approvals off Hermes approves by itself: use block"
+    description: "A web page can hold instructions aimed at the assistant. Once the conversation has read web content, tools that are not read-only (terminal, code, browser, file writes, messages, and file reads outside the folders where Hermes keeps fetched pages) go to Hermes's approval prompt (ask; refused where nobody can answer, such as -Q or cron) or are refused (block). Under --yolo or approvals off Hermes approves by itself: use block"
   respect_ai_optout:
     type: bool
     default: true

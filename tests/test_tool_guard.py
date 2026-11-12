@@ -234,3 +234,84 @@ def test_a_resumed_conversation_with_a_fetching_command_is_marked():
     ]
     ctx.hooks["pre_llm_call"](session_id="s9", user_message="go on", conversation_history=history)
     assert pre(ctx, "terminal", session="s9")["action"] == "approve"
+
+
+# ---------------------------------------------------------------- reads after web content
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    for parts in (("cache", "web"), ("cache", "spillover"), (".ssh",)):
+        tmp_path.joinpath(*parts).mkdir(parents=True)
+    monkeypatch.setattr(gw, "_hermes_home", lambda: tmp_path)
+    return tmp_path
+
+
+def test_reads_anywhere_are_free_before_web_content(home):
+    ctx = setup()
+    assert pre(ctx, "read_file", args={"path": str(home / ".ssh" / "id_ed25519")}) is None
+    assert pre(ctx, "search_files", args={"path": str(home), "pattern": "key"}) is None
+
+
+def test_after_web_content_reading_hermes_saved_pages_stays_free(home):
+    ctx = setup()
+    read_a_page(ctx)
+    assert pre(ctx, "read_file", args={"path": str(home / "cache" / "web" / "site-1c75.md"), "offset": 150}) is None
+    assert pre(ctx, "read_file", args={"path": str(home / "cache" / "spillover" / "p5AL.txt")}) is None
+    assert pre(ctx, "search_files", args={"path": str(home / "cache" / "web"), "pattern": "price"}) is None
+
+
+@pytest.mark.parametrize("tool, where", [
+    ("read_file", (".ssh", "id_ed25519")),
+    ("read_file", ("config.yaml",)),
+    ("search_files", ("cache", "spillover")),   # other tools' and sessions' output
+    ("search_files", ()),                       # the whole Hermes folder
+])
+def test_after_web_content_other_reads_go_to_the_approval_gate(home, tool, where):
+    ctx = setup()
+    read_a_page(ctx)
+    path = str(home.joinpath(*where))
+    out = pre(ctx, tool, args={"path": path})
+    assert out["action"] == "approve" and path in out["message"]
+    assert out["rule_key"] == f"webgraft:tool_guard:{tool}"
+
+
+@pytest.mark.parametrize("path", ["cache/web/site.md", "", None])
+def test_relative_or_missing_paths_are_not_taken_for_the_cache(home, path):
+    ctx = setup()
+    read_a_page(ctx)
+    assert pre(ctx, "read_file", args={"path": path} if path is not None else {})["action"] == "approve"
+
+
+def test_a_path_that_climbs_out_of_the_cache_is_not_free(home):
+    ctx = setup()
+    read_a_page(ctx)
+    sneaky = str(home / "cache" / "web" / ".." / ".." / ".ssh" / "id_ed25519")
+    assert pre(ctx, "read_file", args={"path": sneaky})["action"] == "approve"
+
+
+def test_a_similar_folder_name_is_not_the_cache(home):
+    ctx = setup()
+    read_a_page(ctx)
+    assert pre(ctx, "read_file", args={"path": str(home / "cache" / "web-private" / "x")})["action"] == "approve"
+
+
+def test_the_prompt_shows_the_path_without_control_characters(home):
+    ctx = setup()
+    read_a_page(ctx)
+    out = pre(ctx, "read_file", args={"path": "/etc/passwd\n\x1b[2Jfake approved\r"})
+    assert "\n" not in out["message"] and "\x1b" not in out["message"] and "/etc/passwd" in out["message"]
+
+
+def test_outside_hermes_no_folder_is_free(monkeypatch):
+    monkeypatch.setattr(gw, "_hermes_home", lambda: None)
+    ctx = setup()
+    read_a_page(ctx)
+    assert pre(ctx, "read_file", args={"path": "/anything/cache/web/x.md"})["action"] == "approve"
+
+
+def test_block_mode_blocks_reads_outside_the_cache_too(home):
+    ctx = setup({"tool_guard": "block"})
+    read_a_page(ctx)
+    assert pre(ctx, "read_file", args={"path": str(home / ".ssh" / "id_ed25519")})["action"] == "block"
+    assert pre(ctx, "read_file", args={"path": str(home / "cache" / "web" / "page.md")}) is None

@@ -16,6 +16,7 @@ Hooks only, no extra model call:
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from collections import OrderedDict
@@ -231,11 +232,16 @@ COMMAND_TOOLS = frozenset({"terminal", "process_manage", "execute_code"})
 # one added later, counts as having effects.
 READ_ONLY_TOOLS = frozenset({
     "web_search", "web_extract", "x_search",
-    "read_file", "search_files",
     "skill_view", "skills_list",
     "session_search", "todo_list", "clarify",
     "vision_analyze", "video_analyze",
 })
+# Reading local files is the first half of "read a secret, then put it in a URL": after web content,
+# read_file and search_files stay free only where Hermes keeps what it fetched (documented:
+# HERMES_HOME/cache/web for web_extract text, cache/spillover for oversized tool results, which
+# read_file pages through). search_files is not free in cache/spillover, which holds other tools' and
+# other sessions' output too.
+PATH_READ_TOOLS = {"read_file": (("cache", "web"), ("cache", "spillover")), "search_files": (("cache", "web"),)}
 MAX_WEB_SESSIONS = 1000  # session ids only; each turn also rechecks Hermes's history
 _web_sessions: "OrderedDict[str, None]" = OrderedDict()
 # Tools that execute_code runs for a script reach the hooks with task_id only (no session_id);
@@ -322,7 +328,33 @@ def guard_mode() -> str:
     return value if value in ("ask", "block", "off") else "ask"
 
 
-def _tool_guard(tool_name: str, session_id: str) -> Optional[dict]:
+def _hermes_home() -> Optional[Path]:
+    try:
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home())
+    except Exception:  # noqa: BLE001 - outside Hermes: no folder is free
+        return None
+
+
+def _fetched_folder(tool_name: str, args: Any) -> bool:
+    """Whether a read_file / search_files call targets a folder where Hermes keeps fetched content.
+    A relative path, or one that leaves the folder (.., a link), does not count."""
+    path = (args or {}).get("path") if isinstance(args, dict) else None
+    home = _hermes_home()
+    if not isinstance(path, str) or not path.strip() or home is None:
+        return False
+    target = Path(path.strip()).expanduser()
+    if not target.is_absolute():
+        return False
+    real = os.path.normcase(os.path.realpath(target))
+    for parts in PATH_READ_TOOLS.get(tool_name, ()):
+        folder = os.path.normcase(os.path.realpath(home.joinpath(*parts)))
+        if real == folder or real.startswith(folder.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[dict]:
     if tool_name in READ_ONLY_TOOLS:
         return None
     mode = guard_mode()
@@ -331,9 +363,16 @@ def _tool_guard(tool_name: str, session_id: str) -> Optional[dict]:
     with _lock:
         if session_id not in _web_sessions:
             return None
+    if tool_name in PATH_READ_TOOLS and _fetched_folder(tool_name, args):
+        return None
     if mode == "block":
         return {"action": "block", "message": GUARD_BLOCK}
-    return {"action": "approve", "message": GUARD_ASK.format(tool=tool_name or "this tool"),
+    what = tool_name or "this tool"
+    if tool_name in PATH_READ_TOOLS:
+        # The path comes from the model, maybe from a page: no control characters in the prompt.
+        path = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str((args or {}).get("path") or "the current folder"))[:300]
+        what = f"{tool_name} on {path}"
+    return {"action": "approve", "message": GUARD_ASK.format(tool=what),
             "rule_key": f"webgraft:tool_guard:{tool_name}"}
 
 
@@ -350,7 +389,7 @@ def _guard_tool(tool_name: str = "", args: Any = None, session_id: str = "", too
                 _delegations[_call_key(conversation, tool_call_id)] = _web_reads
                 while len(_delegations) > MAX_SESSIONS * 4:
                     _delegations.popitem(last=False)
-        return _tool_guard(tool_name, conversation)
+        return _tool_guard(tool_name, conversation, args)
     urls = _urls(args)
     directive = None
     if len(urls) > 1 and _setting("one_url_per_call", True):
