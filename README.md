@@ -325,6 +325,17 @@ Runs everything locally, no cloud CI:
 
 `--python 3.12` tests other versions, `--skip-hermes` runs the tests only.
 
+Before a catalog PR (new entry or re-pin), on Windows in Git Bash:
+
+```
+bash tools/catalog_ci.sh path/to/webgraft.yaml
+```
+
+- **What it runs:** Hermes's own "Plugin Catalog CI" checks, from a fresh clone of Hermes's `main`: the structural validator, then the pinned-source gate (clone at the pinned sha, symlink, payload and self-updater checks, `hermes plugins validate --install-deps`).
+- **Same tools as the workflow:** the Python version and `ruamel.yaml` pin are read from Hermes's workflow file, in a throwaway environment.
+- **If Hermes changes its workflow,** the script stops and says so, rather than passing on old rules.
+- **No argument:** checks the entry already published on Hermes's `main`.
+
 The tests use made-up pages and need no network; the document tests start a child Python.
 
 Documents are read with anydoc (`firecrawl-anydoc`), which Hermes provides, so it is not a plugin dependency; `tools/check.py` installs it in the test environment.
