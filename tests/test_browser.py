@@ -23,6 +23,7 @@ def touch(path: Path) -> Path:
 @pytest.mark.parametrize("layout", [
     "chrome-win64/chrome.exe",
     "chrome-linux64/chrome",
+    "chrome-linux-arm64/chrome",
     "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
 ])
 def test_finds_chromium_in_each_layout(tmp_path, layout):

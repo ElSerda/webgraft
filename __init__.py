@@ -3,7 +3,9 @@
 Hooks only, no extra model call:
   pre_llm_call          starts a fresh record for the turn and adds a short reminder
   pre_tool_call         keeps only the first URL of a web_extract call that asks for several (one
-                        URL per call keeps each page within a small model's context)
+                        URL per call keeps each page within a small model's context); once web
+                        content is in the session, sends tools with effects to Hermes's approval gate
+                        (setting tool_guard)
   transform_tool_result adds to that result the URLs that were left out, so the model can open them,
                         and tells the model to open the next result when no page could be read
   post_tool_call        keeps the text of every page web_extract returned, for the whole session
@@ -164,6 +166,9 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
         for page in _pages_from_history(conversation_history):
             with _lock:
                 _remember(session_id, page["url"], page["title"], page["content"])
+    # Web content read earlier in the conversation is still in the context (also after a restart).
+    if _web_in_history(conversation_history):
+        _mark_web(session_id)
     # An interrupted turn never reaches the transform hook, so its record is dropped here.
     with _lock:
         _turns.pop(session_id, None)
@@ -210,15 +215,142 @@ def _urls(args: Any) -> list[str]:
 
 _held: "OrderedDict[str, list[str]]" = OrderedDict()  # tool call -> URLs left out of it
 
+# tool_guard. A web page can carry instructions meant for the assistant (prompt injection). Hermes
+# marks web results as data, but a model may still obey them: in testing, a cloud model sent the
+# user's question to a URL the page named and ran the shell command it asked for. Once web content is
+# in a session it stays in the context, so from then on every tool that is not read-only goes to
+# Hermes's own approval gate ("approve"; nobody to answer, as in -Q or cron, means refused), or is
+# refused ("block", which also holds under --yolo, where Hermes approves everything itself).
+# Tools that bring web content into the session (Hermes wraps their results as untrusted data):
+WEB_TOOLS = frozenset({"web_search", "web_extract", "x_search"})
+WEB_TOOL_PREFIX = "browser_"
+# A command or a script can fetch a page too (curl, git clone, urllib): a URL in it counts as reading
+# the web. Judged on the call, not on its output, like the tools above.
+COMMAND_TOOLS = frozenset({"terminal", "process_manage", "execute_code"})
+# Read-only tools, which stay free: names from Hermes's toolsets reference. Any other tool, including
+# one added later, counts as having effects.
+READ_ONLY_TOOLS = frozenset({
+    "web_search", "web_extract", "x_search",
+    "read_file", "search_files",
+    "skill_view", "skills_list",
+    "session_search", "todo_list", "clarify",
+    "vision_analyze", "video_analyze",
+})
+MAX_WEB_SESSIONS = 1000  # session ids only; each turn also rechecks Hermes's history
+_web_sessions: "OrderedDict[str, None]" = OrderedDict()
+# Tools that execute_code runs for a script reach the hooks with task_id only (no session_id);
+# the model's own calls carry both, so the session is found from the task.
+_task_sessions: "OrderedDict[str, str]" = OrderedDict()
+# A subagent reads the web in its own session; its result then enters the parent's context. Web
+# reads are counted, and a delegate_task during which any web tool ran marks the parent.
+_web_reads = 0
+_delegations: "OrderedDict[str, int]" = OrderedDict()  # delegate_task call -> web reads at its start
+GUARD_ASK = ("webgraft: this conversation has read web pages or search results, and a page can hold "
+             "instructions aimed at the assistant. Approve {tool} only if it does what you asked for. "
+             "(webgraft setting tool_guard)")
+GUARD_BLOCK = ("Blocked by webgraft: this conversation has read web content, and its tool_guard setting "
+               "refuses tools with effects after that, because a web page can hold instructions aimed at you. "
+               "Do not try another tool for the same action: tell the user what you wanted to do, so they "
+               "can do it themselves or change tool_guard.")
+
+
+def _brings_web(tool_name: str, args: Any = None) -> bool:
+    """Whether a call brings web content into the conversation: a web tool, or a command or script
+    that holds an http(s) URL."""
+    if tool_name in WEB_TOOLS or tool_name.startswith(WEB_TOOL_PREFIX):
+        return True
+    if tool_name not in COMMAND_TOOLS or args is None:
+        return False
+    try:
+        text = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(args)
+    return bool(_URL.search(text))
+
+
+def _session_of(session_id: Any, task_id: Any) -> str:
+    """The conversation a tool call belongs to. A call with no session id (a tool that execute_code
+    runs for a script) is matched through its task id; failing that, the task id itself is the key."""
+    session_id, task_id = str(session_id or ""), str(task_id or "")
+    with _lock:
+        if session_id:
+            if task_id:
+                _task_sessions[task_id] = session_id
+                _task_sessions.move_to_end(task_id)
+                while len(_task_sessions) > MAX_WEB_SESSIONS:
+                    _task_sessions.popitem(last=False)
+            return session_id
+        if task_id:
+            return _task_sessions.get(task_id) or f"task:{task_id}"
+    return ""
+
+
+def _mark_web(session_id: str) -> None:
+    with _lock:
+        _web_sessions[session_id] = None
+        _web_sessions.move_to_end(session_id)
+        while len(_web_sessions) > MAX_WEB_SESSIONS:
+            _web_sessions.popitem(last=False)
+
+
+def _web_in_history(history: Any) -> bool:
+    """Whether Hermes's message list holds a result of a tool that brings web content."""
+    names: dict[str, str] = {}
+    for message in history if isinstance(history, list) else []:
+        if not isinstance(message, dict):
+            continue
+        for call in message.get("tool_calls") or []:
+            if isinstance(call, dict):
+                fn = call.get("function") or {}
+                name = str(fn.get("name") or call.get("name") or "")
+                names[str(call.get("id"))] = name
+                if name in COMMAND_TOOLS and _brings_web(name, fn.get("arguments")):
+                    return True
+        if message.get("role") == "tool":
+            name = str(message.get("name") or names.get(str(message.get("tool_call_id")), ""))
+            if _brings_web(name):
+                return True
+    return False
+
+
+def guard_mode() -> str:
+    """tool_guard: ask (default), block or off. A boolean is read as ask (true) or off (false)."""
+    value = _setting("tool_guard", "ask")
+    if isinstance(value, bool):
+        return "ask" if value else "off"
+    value = str(value).strip().lower()
+    return value if value in ("ask", "block", "off") else "ask"
+
+
+def _tool_guard(tool_name: str, session_id: str) -> Optional[dict]:
+    if tool_name in READ_ONLY_TOOLS:
+        return None
+    mode = guard_mode()
+    if mode == "off":
+        return None
+    with _lock:
+        if session_id not in _web_sessions:
+            return None
+    if mode == "block":
+        return {"action": "block", "message": GUARD_BLOCK}
+    return {"action": "approve", "message": GUARD_ASK.format(tool=tool_name or "this tool"),
+            "rule_key": f"webgraft:tool_guard:{tool_name}"}
+
 
 def _call_key(session_id: str, tool_call_id: Any) -> str:
     return f"{session_id}\x00{tool_call_id or ''}"
 
 
 def _guard_tool(tool_name: str = "", args: Any = None, session_id: str = "", tool_call_id: Any = None,
-                **_: Any) -> Optional[dict]:
+                task_id: Any = None, **_: Any) -> Optional[dict]:
     if tool_name != "web_extract":
-        return None
+        conversation = _session_of(session_id, task_id)
+        if tool_name == "delegate_task":
+            with _lock:
+                _delegations[_call_key(conversation, tool_call_id)] = _web_reads
+                while len(_delegations) > MAX_SESSIONS * 4:
+                    _delegations.popitem(last=False)
+        return _tool_guard(tool_name, conversation)
     urls = _urls(args)
     directive = None
     if len(urls) > 1 and _setting("one_url_per_call", True):
@@ -300,7 +432,19 @@ def _json(result: Any) -> Any:
 
 
 def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", args: Any = None,
-                 **_: Any) -> None:
+                 task_id: Any = None, tool_call_id: Any = None, **_: Any) -> None:
+    global _web_reads
+    conversation = _session_of(session_id, task_id)
+    if _brings_web(tool_name, args):
+        with _lock:
+            _web_reads += 1
+        _mark_web(conversation)
+    elif tool_name == "delegate_task":
+        with _lock:
+            start = _delegations.pop(_call_key(conversation, tool_call_id), None)
+            subagent_read_web = start is None or _web_reads > start
+        if subagent_read_web:  # unknown start (another process, a lost record) counts as read
+            _mark_web(conversation)
     if tool_name not in ("web_search", "web_extract"):
         return
     pages = _pages(result) if tool_name == "web_extract" else []

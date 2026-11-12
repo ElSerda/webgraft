@@ -98,6 +98,9 @@ def test_a_child_is_stopped_when_hermes_cancels_the_call():
             await task
         except asyncio.CancelledError:
             pass
+        # Hermes's loop keeps running and closes the dead child's pipes on their EOF; asyncio.run
+        # would close this loop first and leave them to the garbage collector (a stray warning).
+        await asyncio.sleep(0.2)
         return proc.returncode
     assert asyncio.run(run()) is not None
 

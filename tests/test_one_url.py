@@ -26,6 +26,7 @@ class FakeCtx:
 def setup(settings=None):
     gw._sessions.clear()
     gw._turns.clear()
+    gw._web_sessions.clear()
     ctx = FakeCtx(settings)
     gw.register(ctx)
     return ctx

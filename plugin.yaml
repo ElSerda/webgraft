@@ -1,5 +1,5 @@
 name: webgraft
-version: 0.1.0
+version: 0.2.0
 manifest_version: 2
 api_version: 1
 description: "Local page and PDF extraction for web_extract, and the pages an answer really used, as clickable sources"
@@ -43,6 +43,12 @@ config_schema:
     default: true
     label: Use the site's llms.txt
     description: "When a site's llms.txt lists a Markdown (.md) version of the page, read that instead of the HTML; checked once per hour per site"
+  tool_guard:
+    type: str
+    choices: [ask, block, off]
+    default: ask
+    label: Guard tools after web content
+    description: "A web page can hold instructions aimed at the assistant. Once the conversation has read web content, tools that are not read-only (terminal, code, browser, file writes, messages...) go to Hermes's approval prompt (ask; refused where nobody can answer, such as -Q or cron) or are refused (block). Under --yolo or approvals off Hermes approves by itself: use block"
   respect_ai_optout:
     type: bool
     default: true

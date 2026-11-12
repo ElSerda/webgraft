@@ -1,11 +1,16 @@
 """Finds the Chromium that Hermes uses, so Crawl4AI drives it instead of downloading its own.
 
-Same order as Hermes's browser tool (user guide, "Executable resolution"):
+Same order as Hermes's browser tool (Browser guide, "Which Chromium"):
   1. `browser.executable_path` in config.yaml;
   2. the Chromium installed by Hermes's package manager (`hermes pm install chromium`), found
      through `hermes pm env chromium` (its PLAYWRIGHT_BROWSERS_PATH);
   3. /etc/hermes/chromium-executable-path (official Docker image);
-  4. a system `chromium` / `chromium-browser` on PATH.
+  4. a system `chromium` / `chromium-browser` on PATH. Hermes looks there only where its package
+     manager ships no Chromium; a plugin cannot tell which platforms those are, so webgraft always
+     looks there last.
+
+The folder layout inside PLAYWRIGHT_BROWSERS_PATH is not documented by Hermes (its package manager
+knows the binary): _LAYOUTS follows the Chromium builds Playwright publishes.
 
 `setup` resolves it once and records the path in the plugin's data directory; page reads use the
 recorded path, so they never start a `hermes` process.
@@ -25,6 +30,7 @@ _LAYOUTS = (
     "chromium-*/chrome-win/chrome.exe",
     "chromium-*/chrome-linux64/chrome",
     "chromium-*/chrome-linux/chrome",
+    "chromium-*/chrome-linux-arm64/chrome",
     "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",
     "chromium-*/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
 )
