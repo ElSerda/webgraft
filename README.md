@@ -180,9 +180,11 @@ Local test site with injected pages (a code word to start the reply with, a URL 
 ### What webgraft adds: `tool_guard` (on by default)
 
 - **When:** once the conversation has read web content (a result of `web_search`, `web_extract`, `x_search`, a `browser_*` tool or an MCP tool `mcp_*`, the results Hermes itself marks as untrusted), also after a restart or a resumed conversation.
+  - **The mark is kept on disk:** the ids of those conversations (ids only, never content) go to `HERMES_HOME/plugin-data/webgraft/web_sessions.json`, at most 1000. Hermes's history is not enough: when it compresses a conversation it replaces the old tool results with a summary, and that summary can still carry what a page said. Seen live: after `/compress` and a gateway restart, a resumed conversation ran `terminal` until this was added.
+  - A continuation session (Hermes's lineage on compression) and a subagent inherit the mark of their parent (`parent_session_id`).
   - `vision_analyze` and `video_analyze` on an `http://` or `https://` URL count too: they download it, Hermes does not mark the result as untrusted, and an image can hold text.
   - A command or a script that holds an `http://` or `https://` URL counts too (`terminal`, `process_manage`, `execute_code`): `curl`, `wget`, `git clone`, `urllib`. It is judged on the call, not on what came back, so a `git clone https://…` or a `curl` to a local server also turns the guard on.
-  - Tools that `execute_code` runs for a script count too: Hermes gives them no session id, so webgraft finds the conversation through the task id the model's own calls carry.
+  - Tools that `execute_code` runs for a script count too: Hermes gives them no session id, so webgraft finds the conversation through the task id the model's own calls carry, and only `pre_tool_call` (Hermes keeps the post event for the outer `execute_code` call), so a web tool marks the conversation as soon as it is allowed to run. Seen live: before this, a script that read a page left `terminal` free.
   - A subagent reads in its own session: when a web tool ran while a `delegate_task` was out, its result marks the conversation it returns to.
 - **What:** every tool that is not read-only goes to Hermes's own approval prompt, through the documented `pre_tool_call` `approve` directive:
   - terminal, code execution, the browser, file writes, memory, messages, subagents, and any tool not on the read-only list below, including tools added later;
@@ -244,7 +246,7 @@ hermes webgraft uninstall
 hermes plugins remove webgraft
 ```
 
-`uninstall` puts back the web backends and the `web.extract_char_limit` that `setup` replaced (it records them in `HERMES_HOME/plugin-data/webgraft`), removes the skill from `skills.auto_load`, and deletes the Crawl4AI and OCR environments. Hermes's Chromium stays: it belongs to Hermes.
+`uninstall` puts back the web backends and the `web.extract_char_limit` that `setup` replaced (it records them in `HERMES_HOME/plugin-data/webgraft`), removes the skill from `skills.auto_load`, and deletes the Crawl4AI and OCR environments and its `plugin-data/webgraft` folder. Hermes's Chromium stays: it belongs to Hermes.
 
 `hermes plugins remove` alone would leave `web.extract_backend` pointing at a backend that no longer exists.
 
@@ -326,7 +328,8 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
 - **Writes:**
   - `web.search_backend`, `web.extract_backend`, `skills.auto_load`, `web.extract_char_limit` (only if you accept it) and, for SearXNG, `SEARXNG_URL` in `.env`, all through Hermes's own config functions and only during `setup` and `uninstall`;
   - the values `setup` replaced, in `HERMES_HOME/plugin-data/webgraft/previous.json`;
-  - the Chromium path, in `browser.json` next to it.
+  - the Chromium path, in `browser.json` next to it;
+  - the ids of the conversations that read web content, in `web_sessions.json` next to it (no content; at most 1000; see [Prompt injection](#prompt-injection)).
 
   Nothing else is stored: page text lives in memory only, for at most 30 pages per conversation and 20 conversations, and so does which sites publish an `llms.txt` (for an hour); all of it is gone when Hermes stops.
 

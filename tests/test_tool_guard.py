@@ -441,3 +441,115 @@ def test_a_stored_history_of_local_tools_only_is_not_marked():
                {"role": "tool", "tool_call_id": "call_2", "tool_name": "vision_analyze", "content": "a cat"}]
     ctx.hooks["pre_llm_call"](session_id="s9", user_message="go on", conversation_history=history)
     assert pre(ctx, "terminal", session="s9") is None
+
+
+# ---------------------------------------------------------------- the mark survives a restart
+
+
+@pytest.fixture
+def marks(tmp_path, monkeypatch):
+    path = tmp_path / "plugin-data" / "webgraft" / "web_sessions.json"
+    path.parent.mkdir(parents=True)
+    monkeypatch.setattr(gw, "_marks_file", lambda: path)
+    return path
+
+
+def restart():
+    """A new Hermes process: the plugin's memory is empty, its plugin-data file is not."""
+    gw._web_sessions.clear()
+    gw._task_sessions.clear()
+
+
+def test_a_marked_conversation_stays_guarded_after_a_restart(marks):
+    ctx = setup()
+    read_a_page(ctx)
+    restart()
+    assert json.loads(marks.read_text(encoding="utf-8")) == ["s1"]  # the id only, no content
+    assert pre(ctx, "terminal")["action"] == "approve"
+    assert pre(ctx, "terminal", session="s2") is None
+
+
+def test_a_compacted_history_after_a_restart_is_still_guarded(marks):
+    # Seen live (2026-11-13): /compress replaced the web_extract result with a summary; after a
+    # gateway restart the resumed session ran terminal.
+    ctx = setup()
+    read_a_page(ctx, session="s9")
+    restart()
+    compacted = [{"role": "user", "content": "Open https://example.com"},
+                 {"role": "assistant", "content": "[CONTEXT COMPACTION - REFERENCE ONLY] Earlier turns were compacted."}]
+    ctx.hooks["pre_llm_call"](session_id="s9", user_message="run echo", conversation_history=compacted)
+    assert pre(ctx, "terminal", session="s9")["action"] == "approve"
+
+
+def test_the_saved_list_is_bounded_and_written_once_per_conversation(marks):
+    ctx = setup()
+    for i in range(gw.MAX_WEB_SESSIONS + 5):
+        read_a_page(ctx, session=f"s{i}")
+    read_a_page(ctx, session="s7")  # already marked: no rewrite needed
+    ids = json.loads(marks.read_text(encoding="utf-8"))
+    assert len(ids) == gw.MAX_WEB_SESSIONS and ids[-1] == f"s{gw.MAX_WEB_SESSIONS + 4}"
+
+
+def test_script_task_keys_are_not_saved(marks):
+    ctx = setup()
+    ctx.hooks["post_tool_call"](tool_name="web_extract", args={}, result=PAGE, session_id="", task_id="t1")
+    assert not marks.exists() or "task:t1" not in marks.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("content", ["not json", '{"s1": 1}', "[1, 2]", ""])
+def test_a_damaged_file_counts_as_empty(marks, content):
+    marks.write_text(content, encoding="utf-8")
+    ctx = setup()
+    assert pre(ctx, "terminal") is None
+    read_a_page(ctx)
+    assert pre(ctx, "terminal")["action"] == "approve"
+
+
+def test_an_unwritable_folder_keeps_the_mark_in_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr(gw, "_marks_file", lambda: tmp_path / "missing" / "deeper" / "web_sessions.json")
+    ctx = setup()
+    read_a_page(ctx)
+    assert pre(ctx, "terminal")["action"] == "approve"
+
+
+def test_a_continuation_or_child_session_inherits_the_parent_mark(marks):
+    ctx = setup()
+    read_a_page(ctx, session="parent")
+    restart()
+    ctx.hooks["pre_llm_call"](session_id="child", user_message="go on", conversation_history=[],
+                              parent_session_id="parent")
+    assert pre(ctx, "terminal", session="child")["action"] == "approve"
+    ctx.hooks["pre_llm_call"](session_id="other", user_message="go on", conversation_history=[],
+                              parent_session_id="clean-parent")
+    assert pre(ctx, "terminal", session="other") is None
+
+
+# ---------------------------------------------------------------- a script's web read (pre_tool_call only)
+
+
+def test_a_web_read_made_by_a_script_marks_the_conversation_without_a_post_event():
+    # Live trace (2026-11-13, user's TUI): the script's web_extract reached pre_tool_call with task_id and
+    # no session id, and never post_tool_call (Hermes suppresses it inside execute_code); the next
+    # terminal then ran with no prompt.
+    ctx = setup()
+    sid = "local-637b24d7"
+    hook = ctx.hooks["pre_tool_call"]
+    assert hook(tool_name="execute_code", args={"code": "import base64 ..."}, session_id=sid, task_id=sid,
+                tool_call_id="Gi8S") is None
+    assert hook(tool_name="web_extract", args={"urls": ["https://example.com"]}, session_id="", task_id=sid,
+                tool_call_id="") is None
+    ctx.hooks["post_tool_call"](tool_name="execute_code", args={}, result="{}", session_id=sid, task_id=sid)
+    assert pre(ctx, "terminal", session=sid)["action"] == "approve"
+
+
+def test_a_fetching_command_is_not_held_back_by_its_own_mark():
+    ctx = setup()
+    assert pre(ctx, "terminal", args={"command": "curl -s https://example.com"}) is None
+    assert pre(ctx, "terminal", args={"command": "echo next"})["action"] == "approve"
+
+
+def test_a_web_call_that_is_refused_does_not_mark_by_itself():
+    ctx = setup({"tool_guard": "block"})
+    read_a_page(ctx, session="s1")
+    # a refused curl in another conversation brings nothing in
+    assert pre(ctx, "terminal", session="s2", args={"command": "echo hi"}) is None

@@ -49,7 +49,8 @@ def test_several_urls_read_the_first_and_the_result_lists_the_others():
 def test_one_url_passes_and_other_tools_are_untouched():
     ctx = setup()
     assert ctx.hooks["pre_tool_call"](tool_name="web_extract", args={"urls": ["https://a.example/1"]}, session_id="s1") is None
-    assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={"urls": ["a", "b"]}, session_id="s1") is None
+    # another conversation: s1 has now read the web, so tool_guard (tested elsewhere) would ask there
+    assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={"urls": ["a", "b"]}, session_id="s2") is None
     assert ctx.hooks["transform_tool_result"](tool_name="web_extract", result="{}", session_id="s1", tool_call_id="x") is None
 
 

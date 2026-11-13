@@ -202,7 +202,9 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
             with _lock:
                 _remember(session_id, page["url"], page["title"], page["content"])
     # Web content read earlier in the conversation is still in the context (also after a restart).
-    if _web_in_history(conversation_history):
+    # A continuation session (Hermes's lineage on compression) or a subagent inherits its parent's mark.
+    parent = str(_.get("parent_session_id") or "")
+    if _web_in_history(conversation_history) or (parent and _is_marked(parent)):
         _mark_web(session_id)
     # An interrupted turn never reaches the transform hook, so its record is dropped here.
     with _lock:
@@ -352,12 +354,71 @@ def _session_of(session_id: Any, task_id: Any) -> str:
     return ""
 
 
+# The ids of conversations that read web content (ids only, no content) are also kept on disk. Hermes's
+# history is not enough after a restart: compaction replaces the old tool results with a summary (the
+# originals are archived), and that summary can still carry what a page said.
+WEB_SESSIONS_FILE = "web_sessions.json"
+_marks_lock = threading.Lock()
+
+
+def _marks_file() -> Optional[Path]:
+    try:
+        from plugins.plugin_storage import plugin_data_dir  # Hermes plugin public API
+        return plugin_data_dir("webgraft") / WEB_SESSIONS_FILE
+    except Exception:  # noqa: BLE001 - outside Hermes: memory only
+        return None
+
+
+def _saved_marks(path: Optional[Path]) -> list[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path and path.is_file() else []
+    except (OSError, ValueError):
+        return []
+    return [s for s in data if isinstance(s, str)] if isinstance(data, list) else []
+
+
+def _save_mark(session_id: str) -> None:
+    path = _marks_file()
+    if path is None:
+        return
+    with _marks_lock:
+        ids = [s for s in _saved_marks(path) if s != session_id] + [session_id]
+        try:
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(ids[-MAX_WEB_SESSIONS:]), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass  # the mark still holds in this process
+
+
 def _mark_web(session_id: str) -> None:
+    if not session_id:
+        return
     with _lock:
+        new = session_id not in _web_sessions
         _web_sessions[session_id] = None
         _web_sessions.move_to_end(session_id)
         while len(_web_sessions) > MAX_WEB_SESSIONS:
             _web_sessions.popitem(last=False)
+    if new and not session_id.startswith("task:"):
+        _save_mark(session_id)
+
+
+def _is_marked(session_id: str) -> bool:
+    """Whether the conversation has read web content: in this process, or as recorded on disk by an
+    earlier run of Hermes."""
+    if not session_id:
+        return False
+    with _lock:
+        if session_id in _web_sessions:
+            return True
+    if session_id.startswith("task:") or session_id not in _saved_marks(_marks_file()):
+        return False
+    with _lock:
+        _web_sessions[session_id] = None
+        while len(_web_sessions) > MAX_WEB_SESSIONS:
+            _web_sessions.popitem(last=False)
+    return True
 
 
 def _web_in_history(history: Any) -> bool:
@@ -418,9 +479,8 @@ def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[d
     mode = guard_mode()
     if mode == "off":
         return None
-    with _lock:
-        if session_id not in _web_sessions:
-            return None
+    if not _is_marked(session_id):
+        return None
     if tool_name in MEDIA_TOOLS and _media_source(tool_name, args) != "file":
         return None  # a URL is a web read, free like web_extract; data: is inline, no read
     if tool_name in PATH_READ_TOOLS and _fetched_folder(tool_name, args):
@@ -442,14 +502,33 @@ def _call_key(session_id: str, tool_call_id: Any) -> str:
 
 def _guard_tool(tool_name: str = "", args: Any = None, session_id: str = "", tool_call_id: Any = None,
                 task_id: Any = None, **_: Any) -> Optional[dict]:
-    if tool_name != "web_extract":
-        conversation = _session_of(session_id, task_id)
+    conversation = _session_of(session_id, task_id)
+    if tool_name == "web_extract":
+        directive = _one_url(args, session_id, tool_call_id)
+    else:
         if tool_name == "delegate_task":
             with _lock:
                 _delegations[_call_key(conversation, tool_call_id)] = _web_reads
                 while len(_delegations) > MAX_SESSIONS * 4:
                     _delegations.popitem(last=False)
-        return _tool_guard(tool_name, conversation, args)
+        directive = _tool_guard(tool_name, conversation, args)
+    # The tools a script runs (execute_code) reach pre_tool_call only: Hermes leaves the post event to
+    # the outer call (model_tools.suppress_post_tool_call_hook). Seen live: a script's web_extract never
+    # reached post_tool_call. So a call that brings web content marks the conversation here as well,
+    # once it is allowed (a curl that waits for approval is marked by post_tool_call when it has run).
+    if (directive is None or directive.get("action") == "modify") and _brings_web(tool_name, args):
+        _note_web_read(conversation)
+    return directive
+
+
+def _note_web_read(conversation: str) -> None:
+    global _web_reads
+    with _lock:
+        _web_reads += 1
+    _mark_web(conversation)
+
+
+def _one_url(args: Any, session_id: str, tool_call_id: Any) -> Optional[dict]:
     urls = _urls(args)
     directive = None
     if len(urls) > 1 and _setting("one_url_per_call", True):
@@ -532,12 +611,9 @@ def _json(result: Any) -> Any:
 
 def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", args: Any = None,
                  task_id: Any = None, tool_call_id: Any = None, **_: Any) -> None:
-    global _web_reads
     conversation = _session_of(session_id, task_id)
     if _brings_web(tool_name, args):
-        with _lock:
-            _web_reads += 1
-        _mark_web(conversation)
+        _note_web_read(conversation)
     elif tool_name == "delegate_task":
         with _lock:
             start = _delegations.pop(_call_key(conversation, tool_call_id), None)
