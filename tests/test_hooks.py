@@ -415,3 +415,55 @@ def test_outside_hermes_an_url_reference_is_not_read(monkeypatch):
     ctx = setup()
     ctx.hooks["pre_llm_call"](session_id="u4", user_message="Ouvre @url:https://a.example", conversation_history=[])
     assert ctx.hooks["transform_llm_output"](response_text="Ok.", session_id="u4", model="m", platform="cli") is None
+
+
+# ---------------------------------------------------------------- pages Hermes's keyless rescue served
+
+
+def refused_here(monkeypatch, refused: dict):
+    ex = importlib.import_module("webgraft.extract")
+    monkeypatch.setattr(ex, "refused_here", lambda url: refused.get(url.rstrip("/"), ""))
+
+
+RESCUED = {"url": "https://self-signed.badssl.com/", "title": "self-signed.badssl.com", "content": "self-signed.badssl.com " * 5}
+CERT = "could not download: ConnectError: certificate verify failed: self-signed certificate"
+
+
+def test_a_page_webgraft_refused_and_hermes_rescued_is_named_as_such(monkeypatch):
+    refused_here(monkeypatch, {"https://self-signed.badssl.com": CERT})
+    ctx = setup()
+    out = run_turn(ctx, "La page dit self-signed.", [("web_extract", extract_result(RESCUED, PAGE))])
+    assert "Sources (pages ouvertes) :\n- https://portal.example/cloud" in out
+    sources, rescued = out.split("Lues par le secours sans clé d'Hermes (un service extérieur), pas sur cette machine :")
+    assert "badssl" not in sources
+    assert rescued.strip().startswith("- https://self-signed.badssl.com/ (here: could not download: ConnectError")
+
+
+def test_the_model_is_told_which_pages_came_from_the_rescue(monkeypatch):
+    refused_here(monkeypatch, {"https://self-signed.badssl.com": CERT})
+    ctx = setup()
+    noted = json.loads(ctx.hooks["transform_tool_result"](tool_name="web_extract", result=extract_result(RESCUED),
+                                                          session_id="r1", tool_call_id="c1"))
+    assert "keyless rescue" in noted["webgraft_note"] and "self-signed.badssl.com" in noted["webgraft_note"]
+
+
+def test_a_page_webgraft_read_itself_is_a_plain_source(monkeypatch):
+    refused_here(monkeypatch, {})
+    ctx = setup()
+    out = run_turn(ctx, "La formule Plus coûte 20 $.", [("web_extract", extract_result(PAGE))])
+    assert "secours" not in out and "portal.example/cloud" in out
+
+
+def test_the_refusal_record_is_short_lived_and_bounded(monkeypatch):
+    ex = importlib.import_module("webgraft.extract")
+    ex._refused.clear()
+    page = ex.Page("https://a.example/x", error=CERT)
+    ex._note_refused(page, "https://a.example/x#top")
+    assert ex.refused_here("https://a.example/x/") == CERT
+    stamp, why = ex._refused["https://a.example/x"]
+    ex._refused["https://a.example/x"] = (stamp - ex.REFUSED_SECONDS - 1, why)
+    assert ex.refused_here("https://a.example/x") == ""
+    for i in range(ex.MAX_REFUSED + 10):
+        ex._note_refused(ex.Page(f"https://b.example/{i}", error="x"), f"https://b.example/{i}")
+    assert len(ex._refused) == ex.MAX_REFUSED
+    ex._refused.clear()

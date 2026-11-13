@@ -12,6 +12,7 @@ _TEXT = {
         "no_page": "No page could be read.",
         "unread": "Refused or unreadable:",
         "attached": "Attached by you (@url), read before the answer:",
+        "rescued": "Read by Hermes's keyless rescue (an outside service), not on this machine:",
     },
     "fr": {
         "sources": "Sources (pages ouvertes) :",
@@ -19,6 +20,7 @@ _TEXT = {
         "no_page": "Aucune page n'a pu être lue.",
         "unread": "Refusées ou illisibles :",
         "attached": "Jointes par toi (@url), lues avant la réponse :",
+        "rescued": "Lues par le secours sans clé d'Hermes (un service extérieur), pas sur cette machine :",
     },
 }
 
@@ -102,14 +104,17 @@ def _unread_line(url: str, why: str) -> str:
 
 
 def build(opened: list[str], searched: bool, titles: dict[str, str] | None = None,
-          unread: list[tuple[str, str]] | None = None, attached: list[str] | None = None) -> str:
+          unread: list[tuple[str, str]] | None = None, attached: list[str] | None = None,
+          rescued: list[tuple[str, str]] | None = None) -> str:
     """opened: the pages web_extract returned in this turn; unread: (url, why) for the pages it could
     not read; searched: a web_search ran; attached: the pages the user attached with @url:. All from
     the tool results and the user's message: nothing is guessed from the answer. The wording follows
     Hermes's language."""
-    unread, attached = unread or [], attached or []
+    unread, attached, rescued = unread or [], attached or [], rescued or []
     if opened:
         lines = [text("sources")] + [_source_line(url, titles or {}) for url in opened]
+    elif rescued:
+        lines = []
     elif unread:
         lines = [text("no_page")]
     elif searched:
@@ -118,6 +123,8 @@ def build(opened: list[str], searched: bool, titles: dict[str, str] | None = Non
         lines = []
     else:
         return text("no_page")
+    if rescued:
+        lines += [text("rescued")] + [_unread_line(url, f"here: {why}") for url, why in rescued[:MAX_UNREAD]]
     if attached:
         lines += [text("attached")] + [f"- {quote(url, safe=_URL_SAFE)}" for url in attached[:MAX_UNREAD]]
     if unread:

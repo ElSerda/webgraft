@@ -158,6 +158,7 @@ Every page `web_extract` returned with real content in this turn.
 - The list comes from the tool results of the turn, not from the answer: nothing is guessed from the answer's wording or numbers.
 - When no page was opened, the footer says that the answer relies on search snippets only; when every page failed, that no page could be read.
 - Pages you attached with `@url:` are listed under "Attached by you (@url), read before the answer".
+- Pages webgraft could not read here (a certificate not trusted, a connection that failed) and that Hermes's one-shot keyless rescue then fetched through an outside service are listed apart, under "Read by Hermes's keyless rescue (an outside service), not on this machine", with the reason webgraft gave. The model is told too: Hermes drops its own rescue note before the model sees the page.
 - Pages that could not be read are named under "Refused or unreadable", with the reason from the tool result (HTTP status, bot wall, AI opt-out), at most 20 per answer: over a long search, the answer says which sites refused.
 - A turn without web tools gets no footer.
 

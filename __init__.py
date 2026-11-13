@@ -215,7 +215,15 @@ def _attached_urls(message: Any) -> list[str]:
 
 
 def _new_turn() -> dict[str, Any]:
-    return {"opened": [], "titles": {}, "searched": False, "unread": {}, "attached": []}
+    return {"opened": [], "titles": {}, "searched": False, "unread": {}, "attached": [], "rescued": {}}
+
+
+def _rescued(result: Any) -> list[tuple[str, str]]:
+    """(url, why webgraft could not read it) for the pages of a web_extract result that webgraft had
+    just refused: Hermes's keyless rescue served them from an outside service."""
+    from . import extract
+
+    return [(p["url"], why) for p in _pages(result) if (why := extract.refused_here(p["url"]))]
 
 
 def _start_turn(session_id: str = "", user_message: Any = "", conversation_history: Any = None,
@@ -568,6 +576,9 @@ def _one_url(args: Any, session_id: str, tool_call_id: Any) -> Optional[dict]:
     return directive
 
 
+RESCUE_NOTE = ("webgraft could not read these pages on this machine, and Hermes's keyless rescue then fetched "
+               "them through an outside service, which does not check the site's certificate the way webgraft "
+               "does: treat their content with that in mind and tell the user where it came from. ")
 EMPTY_SEARCH_NOTE = ("This search returned no result. A self-hosted search backend also answers nothing when "
                      "the engines behind it rate-limit it, which several searches sent at once trigger. "
                      "An empty search does not show that something does not exist: search again with one "
@@ -593,6 +604,8 @@ def _annotate(tool_name: str = "", result: Any = None, session_id: str = "", too
                          "This call read only the first URL. Not opened: " + ", ".join(held))
         if _nothing_read(result):
             notes.append(UNREAD_NOTE)
+        if rescued := _rescued(result):
+            notes.append(RESCUE_NOTE + "; ".join(f"{url} (here: {why[:120]})" for url, why in rescued))
         if not notes:
             return None
         note = " ".join(notes)
@@ -648,6 +661,8 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
         return
     pages = _pages(result) if tool_name == "web_extract" else []
     unread = _unread(result) if tool_name == "web_extract" else []
+    rescued = dict(_rescued(result)) if tool_name == "web_extract" else {}
+    pages = [p for p in pages if p["url"] not in rescued]
     with _lock:
         turn = _turns.setdefault(session_id, _new_turn())
         _turns.move_to_end(session_id)
@@ -661,6 +676,8 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
                 turn["titles"][page["url"]] = page["title"]
         for url, why in unread:
             turn["unread"].setdefault(url, why)
+        for url, why in rescued.items():
+            turn["rescued"].setdefault(url, why)
 
 
 def _footer_on() -> bool:
@@ -676,7 +693,8 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
     if not response_text or turn is None or not _footer_on():
         return None  # no web tool this turn: nothing to report
     unread = [(u, w) for u, w in turn["unread"].items() if u not in turn["opened"]]
-    text = footer.build(turn["opened"], turn["searched"], turn["titles"], unread, turn["attached"])
+    text = footer.build(turn["opened"], turn["searched"], turn["titles"], unread, turn["attached"],
+                        list(turn["rescued"].items()))
     # Keep the answer byte for byte: Hermes then prints only the added footer after a streamed reply.
     return f"{response_text}\n\n{text}" if text else None
 

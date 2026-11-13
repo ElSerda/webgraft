@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -934,6 +935,40 @@ def same_site(a: str, b: str) -> bool:
     return bool(host(a)) and host(a) == host(b)
 
 
+# Pages webgraft could not read here, remembered for a few minutes. When every page of a call fails
+# with no HTTP answer from the site (a certificate refused, a connection that failed), Hermes's
+# one-shot keyless rescue re-fetches them through outside services, which do not check certificates
+# the way webgraft does, and drops its own annotation before the model sees the page. webgraft then
+# says so (note to the model, footer), from this record and the tool result.
+REFUSED_SECONDS = 300
+MAX_REFUSED = 500
+_refused: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
+_refused_lock = threading.Lock()
+
+
+def _url_key(url: str) -> str:
+    from urllib.parse import urldefrag
+    return urldefrag(str(url or ""))[0].rstrip("/")
+
+
+def _note_refused(page: Page, requested: str) -> None:
+    now = time.monotonic()
+    with _refused_lock:
+        for url in {requested, page.url}:
+            if url:
+                _refused[_url_key(url)] = (now, page.error)
+                _refused.move_to_end(_url_key(url))
+        while len(_refused) > MAX_REFUSED:
+            _refused.popitem(last=False)
+
+
+def refused_here(url: str) -> str:
+    """Why webgraft could not read this page in the last few minutes, or an empty string."""
+    with _refused_lock:
+        seen = _refused.get(_url_key(url))
+    return seen[1] if seen and time.monotonic() - seen[0] < REFUSED_SECONDS else ""
+
+
 async def read_pages(urls: list[str]) -> list[Page]:
     # No User-Agent of our own: Hermes's client names the agent ("HermesAgent"), and the browser is
     # given that same value (see _user_agent).
@@ -941,7 +976,11 @@ async def read_pages(urls: list[str]) -> list[Page]:
     async with http_client(follow_redirects=True, timeout=FETCH_TIMEOUT, headers=headers,
                            event_hooks={"response": [_note_status]}) as client:
         _user_agent.set(str(client.headers.get("user-agent") or ""))
-        return list(await asyncio.gather(*(read_page(client, u) for u in urls)))
+        pages = list(await asyncio.gather(*(read_page(client, u) for u in urls)))
+    for url, page in zip(urls, pages):
+        if page.error:
+            _note_refused(page, url)
+    return pages
 
 
 if __name__ == "__main__" and len(sys.argv) > 1:  # manual check: python -m ... URL
