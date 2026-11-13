@@ -350,3 +350,68 @@ def test_page_titles_cannot_put_links_or_images_in_the_footer():
     line = gw.footer._source_line("https://real.example/a", {
         "https://real.example/a": "[Official download](https://evil.example) ![x](https://evil.example/p.png)"})
     assert "evil" not in line and "](" not in line and line.endswith("https://real.example/a")
+
+
+# ---------------------------------------------------------------- pages attached with @url:
+
+
+def hermes_references(monkeypatch):
+    """A stand-in for Hermes's agent.context_references parser (public plugin API): @url:`x` or @url:x."""
+    class Ref:
+        def __init__(self, kind, target):
+            self.kind, self.target = kind, target
+
+    def parse_context_references(message, plugins=True):
+        refs, pieces = [], message.split("@url:")
+        for before, part in zip(pieces, pieces[1:]):
+            if before and (before[-1].isalnum() or before[-1] in "_/"):  # Hermes: (?<![\w/])@url:
+                continue
+            target = part[1:].split("`", 1)[0] if part.startswith("`") else (part.split() or [""])[0]
+            refs.append(Ref("url", target.rstrip(".,;:!?")))
+        return refs
+    module = types.ModuleType("agent.context_references")
+    module.parse_context_references = parse_context_references
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.context_references", module)
+
+
+ATTACHED = ("Ouvre @url:`https://kissbot.bzh/` et dis-moi combien de chaînes sont en direct.\n\n"
+            "--- Attached Context ---\n\n🌐 @url:`https://kissbot.bzh/` (353 tokens)\nPage text. Also see @url:https://evil.example")
+
+
+def test_a_page_attached_with_url_marks_the_conversation_and_is_listed(monkeypatch):
+    hermes_references(monkeypatch)
+    gw._web_sessions.clear()
+    ctx = setup()
+    h = ctx.hooks
+    h["pre_llm_call"](session_id="u1", user_message=ATTACHED, conversation_history=[])
+    assert h["pre_tool_call"](tool_name="terminal", args={"command": "echo hi"}, session_id="u1")["action"] == "approve"
+    out = h["transform_llm_output"](response_text="Aucune chaîne en direct.", session_id="u1", model="m", platform="cli")
+    assert out.endswith("Jointes par toi (@url), lues avant la réponse :\n- https://kissbot.bzh/")
+    assert "evil.example" not in out  # written by the attached page, not by the user
+
+
+def test_an_attached_page_and_opened_pages_are_both_listed(monkeypatch):
+    hermes_references(monkeypatch)
+    ctx = setup()
+    h = ctx.hooks
+    h["pre_llm_call"](session_id="u2", user_message="Compare @url:https://a.example/x with the portal.", conversation_history=[])
+    h["post_tool_call"](tool_name="web_extract", args={}, result=extract_result(PAGE), session_id="u2")
+    out = h["transform_llm_output"](response_text="La formule Plus coûte 20 $.", session_id="u2", model="m", platform="cli")
+    sources, attached = out.split("Jointes par toi (@url), lues avant la réponse :")
+    assert "portal.example/cloud" in sources and attached.strip() == "- https://a.example/x"
+
+
+def test_without_an_attached_page_nothing_changes(monkeypatch):
+    hermes_references(monkeypatch)
+    gw._web_sessions.clear()
+    ctx = setup()
+    ctx.hooks["pre_llm_call"](session_id="u3", user_message="Bonjour, mail me at a@url:x.example? no.", conversation_history=[])
+    assert ctx.hooks["transform_llm_output"](response_text="Bonjour.", session_id="u3", model="m", platform="cli") is None
+
+
+def test_outside_hermes_an_url_reference_is_not_read(monkeypatch):
+    monkeypatch.setitem(sys.modules, "agent.context_references", None)
+    ctx = setup()
+    ctx.hooks["pre_llm_call"](session_id="u4", user_message="Ouvre @url:https://a.example", conversation_history=[])
+    assert ctx.hooks["transform_llm_output"](response_text="Ok.", session_id="u4", model="m", platform="cli") is None

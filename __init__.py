@@ -194,6 +194,30 @@ def _text_of(message: Any) -> str:
     return ""
 
 
+# Where Hermes appends what @-references expanded to (agent/context_references.py).
+ATTACHED_CONTEXT = "--- Attached Context ---"
+
+
+def _attached_urls(message: Any) -> list[str]:
+    """The pages the user attached with @url:, in order. Hermes fetches them itself before the model
+    runs (no tool call: no hook sees them) and puts their text in the user's message, outside its
+    untrusted-data wrapper. Read with Hermes's own parser (agent.context_references, public plugin
+    API), on the user's words only: not on the attached text, where a page could write "@url:"."""
+    text = _text_of(message).split(ATTACHED_CONTEXT, 1)[0]
+    if "@url:" not in text:
+        return []
+    try:
+        from agent.context_references import parse_context_references
+        refs = parse_context_references(text, plugins=False)
+    except Exception:  # noqa: BLE001 - outside Hermes, or an older Hermes
+        return []
+    return list(dict.fromkeys(str(r.target) for r in refs if r.kind == "url" and r.target))
+
+
+def _new_turn() -> dict[str, Any]:
+    return {"opened": [], "titles": {}, "searched": False, "unread": {}, "attached": []}
+
+
 def _start_turn(session_id: str = "", user_message: Any = "", conversation_history: Any = None,
                 **_: Any) -> Optional[str]:
     # Web content read earlier in the conversation is still in the context (also after a restart).
@@ -204,6 +228,13 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
     # An interrupted turn never reaches the transform hook, so its record is dropped here.
     with _lock:
         _turns.pop(session_id, None)
+    # Pages attached with @url: are web content in the conversation from this turn on.
+    if attached := _attached_urls(user_message):
+        _mark_web(session_id)
+        with _lock:
+            _turns[session_id] = dict(_new_turn(), attached=attached)
+            while len(_turns) > MAX_SESSIONS:
+                _turns.popitem(last=False)
     parts = []
     if _setting("remind", True):
         footer = FOOTER_SENTENCE if _footer_on() else NO_FOOTER_SENTENCE
@@ -618,7 +649,7 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
     pages = _pages(result) if tool_name == "web_extract" else []
     unread = _unread(result) if tool_name == "web_extract" else []
     with _lock:
-        turn = _turns.setdefault(session_id, {"opened": [], "titles": {}, "searched": False, "unread": {}})
+        turn = _turns.setdefault(session_id, _new_turn())
         _turns.move_to_end(session_id)
         while len(_turns) > MAX_SESSIONS:
             _turns.popitem(last=False)
@@ -645,7 +676,7 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
     if not response_text or turn is None or not _footer_on():
         return None  # no web tool this turn: nothing to report
     unread = [(u, w) for u, w in turn["unread"].items() if u not in turn["opened"]]
-    text = footer.build(turn["opened"], turn["searched"], turn["titles"], unread)
+    text = footer.build(turn["opened"], turn["searched"], turn["titles"], unread, turn["attached"])
     # Keep the answer byte for byte: Hermes then prints only the added footer after a streamed reply.
     return f"{response_text}\n\n{text}" if text else None
 

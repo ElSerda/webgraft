@@ -11,12 +11,14 @@ _TEXT = {
         "snippets": "No page opened: this answer relies on search snippets only.",
         "no_page": "No page could be read.",
         "unread": "Refused or unreadable:",
+        "attached": "Attached by you (@url), read before the answer:",
     },
     "fr": {
         "sources": "Sources (pages ouvertes) :",
         "snippets": "Aucune page ouverte : réponse basée sur les extraits de recherche.",
         "no_page": "Aucune page n'a pu être lue.",
         "unread": "Refusées ou illisibles :",
+        "attached": "Jointes par toi (@url), lues avant la réponse :",
     },
 }
 
@@ -100,17 +102,24 @@ def _unread_line(url: str, why: str) -> str:
 
 
 def build(opened: list[str], searched: bool, titles: dict[str, str] | None = None,
-          unread: list[tuple[str, str]] | None = None) -> str:
+          unread: list[tuple[str, str]] | None = None, attached: list[str] | None = None) -> str:
     """opened: the pages web_extract returned in this turn; unread: (url, why) for the pages it could
-    not read; searched: a web_search ran. All from the tool results: nothing is guessed from the
-    answer. The wording follows Hermes's language."""
-    unread = unread or []
+    not read; searched: a web_search ran; attached: the pages the user attached with @url:. All from
+    the tool results and the user's message: nothing is guessed from the answer. The wording follows
+    Hermes's language."""
+    unread, attached = unread or [], attached or []
     if opened:
         lines = [text("sources")] + [_source_line(url, titles or {}) for url in opened]
     elif unread:
         lines = [text("no_page")]
+    elif searched:
+        lines = [text("snippets")]
+    elif attached:
+        lines = []
     else:
-        return text("snippets") if searched else text("no_page")
+        return text("no_page")
+    if attached:
+        lines += [text("attached")] + [f"- {quote(url, safe=_URL_SAFE)}" for url in attached[:MAX_UNREAD]]
     if unread:
         lines += [text("unread")] + [_unread_line(url, why) for url, why in unread[:MAX_UNREAD]]
     return "\n".join(lines)

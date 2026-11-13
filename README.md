@@ -157,6 +157,7 @@ Every page `web_extract` returned with real content in this turn.
 
 - The list comes from the tool results of the turn, not from the answer: nothing is guessed from the answer's wording or numbers.
 - When no page was opened, the footer says that the answer relies on search snippets only; when every page failed, that no page could be read.
+- Pages you attached with `@url:` are listed under "Attached by you (@url), read before the answer".
 - Pages that could not be read are named under "Refused or unreadable", with the reason from the tool result (HTTP status, bot wall, AI opt-out), at most 20 per answer: over a long search, the answer says which sites refused.
 - A turn without web tools gets no footer.
 
@@ -184,6 +185,7 @@ Local test site with injected pages (a code word to start the reply with, a URL 
 
 - **When:** once the conversation has read web content (a result of `web_search`, `web_extract`, `x_search`, a `browser_*` tool or an MCP tool `mcp_*`, the results Hermes itself marks as untrusted, or a hosted connector `connectors__*` such as mail or Notion, which Hermes does not mark), also after a restart or a resumed conversation.
   - A tool call that carries neither a session id nor a known task id cannot be tied to a conversation: it is guarded as soon as any conversation in this Hermes process has read web content.
+  - A page you attach with `@url:` counts too. Hermes fetches it itself before the model runs, with no tool call (no hook sees it), and puts its text in your message, outside its untrusted-data wrapper: webgraft reads the references with Hermes's own parser (`agent.context_references`, public plugin API), on your words only.
   - **The mark is kept on disk:** the ids of those conversations (ids only, never content) go to `HERMES_HOME/plugin-data/webgraft/web_sessions.json`, at most 1000. Hermes's history is not enough: when it compresses a conversation it replaces the old tool results with a summary, and that summary can still carry what a page said. Seen live: after `/compress` and a gateway restart, a resumed conversation ran `terminal` until this was added.
   - A continuation session (Hermes's lineage on compression) and a subagent inherit the mark of their parent (`parent_session_id`).
   - `vision_analyze` and `video_analyze` on an `http://` or `https://` URL count too: they download it, Hermes does not mark the result as untrusted, and an image can hold text.
