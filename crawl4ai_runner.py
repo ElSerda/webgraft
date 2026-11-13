@@ -30,6 +30,11 @@ DEVTOOLS_WAIT = 20
 MAX_MARKDOWN = 400_000  # characters handed back; the plugin reads no more of a page
 MAX_HEAD = 100_000  # of the HTML, for the page's AI opt-out tags (robots / tdm-reservation)
 MAX_HTML = 3_000_000  # of the rendered HTML, for the values its markup states (structured.py)
+# Crawl4AI's BrowserConfig ignores TLS certificate errors by default (ignore_https_errors=True). Over
+# CDP, Chromium still refused a bad certificate in testing (net::ERR_CERT_AUTHORITY_INVALID on
+# badssl.com), but that rests on how Crawl4AI builds its context: certificates are checked on purpose,
+# like Hermes's own HTTP client, so a man-in-the-middle without a trusted certificate is refused.
+TLS_CHECKED = {"ignore_https_errors": False}
 
 
 # The page's host pinned to the address the plugin checked (DNS rebinding), sent as two variables.
@@ -136,7 +141,7 @@ async def crawl(url: str, ws_url: str) -> dict:
     # Hermes's own User-Agent, passed by the plugin: Crawl4AI would otherwise present itself as a
     # desktop Chrome on macOS.
     browser = BrowserConfig(cdp_url=ws_url, browser_mode="cdp", headless=True, verbose=False,
-                            user_agent=os.environ["WEBGRAFT_USER_AGENT"], user_agent_mode="")
+                            user_agent=os.environ["WEBGRAFT_USER_AGENT"], user_agent_mode="", **TLS_CHECKED)
     async with AsyncWebCrawler(config=browser) as crawler:
         r = await crawler.arun(url=url, config=run)
     if not r.success:

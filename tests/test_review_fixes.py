@@ -283,3 +283,9 @@ def test_merge_lists_them_under_one_heading_and_bounded():
     extra = content.split(ex.STRUCTURE_HEADING, 1)[1]
     assert engine == "trafilatura" and len(extra) <= ex.MAX_COMPLEMENT_CHARS + 50
     assert "- Row 0: 0 GB" in extra
+
+
+def test_the_browser_checks_tls_certificates_on_purpose():
+    # Crawl4AI's own default is ignore_https_errors=True; Hermes's HTTP client checks certificates.
+    assert runner.TLS_CHECKED == {"ignore_https_errors": False}
+    assert "**TLS_CHECKED" in Path(runner.__file__).read_text(encoding="utf-8")
