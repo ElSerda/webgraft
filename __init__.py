@@ -124,21 +124,55 @@ def _footer_in_history(history: Any) -> str:
     return ""
 
 
-def _pages_from_history(history: Any) -> list[dict]:
-    """Pages that web_extract returned earlier in the conversation, from Hermes's message list."""
+# Hermes's dispatcher tool (tools reference: tools "callable through tool_describe/tool_call"). Its
+# history entry names the dispatcher; the real call is in its arguments, {"calls": [{name, arguments}]}.
+TOOL_CALL_DISPATCHER = "tool_call"
+
+
+def _history_calls(message: dict) -> list[tuple[str, str, Any]]:
+    """(call id, tool name, arguments) for each tool call of a message in Hermes's history, with the
+    calls made through the tool_call dispatcher unwrapped."""
+    found = []
+    for call in message.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") or {}
+        name = str(fn.get("name") or call.get("name") or "")
+        args = fn.get("arguments", call.get("arguments"))
+        entries = _args_dict(args).get("calls") if name == TOOL_CALL_DISPATCHER else None
+        if isinstance(entries, list) and entries:
+            found += [(str(call.get("id")), str(e.get("name") or ""), e.get("arguments"))
+                      for e in entries if isinstance(e, dict)]
+        else:
+            found.append((str(call.get("id")), name, args))
+    return found
+
+
+def _history_tools(history: Any):
+    """Walks Hermes's message list: yields ("call", name, arguments) for each tool call and
+    ("result", name, content) for each tool result. A result is named by its own tool_name (what
+    Hermes stores) or name, else by the call it answers."""
     names: dict[str, str] = {}
-    pages: list[dict] = []
     for message in history if isinstance(history, list) else []:
         if not isinstance(message, dict):
             continue
-        for call in message.get("tool_calls") or []:
-            if isinstance(call, dict):
-                fn = call.get("function") or {}
-                names[str(call.get("id"))] = str(fn.get("name") or call.get("name") or "")
+        for call_id, name, args in _history_calls(message):
+            names.setdefault(call_id, name)
+            yield "call", name, args
         if message.get("role") == "tool":
-            name = message.get("name") or names.get(str(message.get("tool_call_id")), "")
-            if name == "web_extract":
-                pages.extend(_pages(message.get("content")))
+            name = str(message.get("tool_name") or message.get("name")
+                       or names.get(str(message.get("tool_call_id")), ""))
+            if name == TOOL_CALL_DISPATCHER:
+                name = names.get(str(message.get("tool_call_id")), name)
+            yield "result", name, message.get("content")
+
+
+def _pages_from_history(history: Any) -> list[dict]:
+    """Pages that web_extract returned earlier in the conversation, from Hermes's message list."""
+    pages: list[dict] = []
+    for kind, name, content in _history_tools(history):
+        if kind == "result" and name == "web_extract":
+            pages.extend(_pages(content))
     return pages
 
 
@@ -327,22 +361,13 @@ def _mark_web(session_id: str) -> None:
 
 
 def _web_in_history(history: Any) -> bool:
-    """Whether Hermes's message list holds a result of a tool that brings web content."""
-    names: dict[str, str] = {}
-    for message in history if isinstance(history, list) else []:
-        if not isinstance(message, dict):
-            continue
-        for call in message.get("tool_calls") or []:
-            if isinstance(call, dict):
-                fn = call.get("function") or {}
-                name = str(fn.get("name") or call.get("name") or "")
-                names[str(call.get("id"))] = name
-                if (name in COMMAND_TOOLS or name in MEDIA_TOOLS) and _brings_web(name, fn.get("arguments")):
-                    return True
-        if message.get("role") == "tool":
-            name = str(message.get("name") or names.get(str(message.get("tool_call_id")), ""))
-            if _brings_web(name):
-                return True
+    """Whether Hermes's message list holds a result of a tool that brings web content, or a call
+    whose arguments fetch from the web (a command or script with a URL, an image or video URL)."""
+    for kind, name, value in _history_tools(history):
+        if kind == "call" and (name in COMMAND_TOOLS or name in MEDIA_TOOLS) and _brings_web(name, value):
+            return True
+        if kind == "result" and _brings_web(name):
+            return True
     return False
 
 

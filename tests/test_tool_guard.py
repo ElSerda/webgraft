@@ -391,3 +391,53 @@ def test_a_resumed_conversation_with_a_local_image_is_not_marked():
                {"role": "tool", "tool_call_id": "t1", "content": "a cat"}]
     ctx.hooks["pre_llm_call"](session_id="s9", user_message="go on", conversation_history=history)
     assert pre(ctx, "terminal", session="s9") is None
+
+
+# ---------------------------------------------------------------- history as Hermes stores it
+
+
+def dispatched(call_id, name, arguments=None):
+    """An assistant message as Hermes 0.23 stores a call made through its tool_call dispatcher
+    (seen live, 2026-11-13: the call is named tool_call, the result carries tool_name)."""
+    inner = json.dumps({"calls": [{"name": name, "arguments": arguments or {}}]})
+    return {"role": "assistant", "tool_calls": [{"id": call_id, "call_id": call_id, "type": "function",
+                                                 "function": {"name": "tool_call", "arguments": inner}}]}
+
+
+@pytest.mark.parametrize("name", ["mcp__wgtest__get_note", "web_extract", "web_search", "browser_navigate"])
+def test_a_resumed_conversation_in_hermes_stored_form_is_marked(name):
+    ctx = setup()
+    history = [{"role": "user", "content": "go"}, dispatched("call_1", name),
+               {"role": "tool", "tool_call_id": "call_1", "tool_name": name,
+                "content": f'<untrusted_tool_result source="{name}">\nnote\n</untrusted_tool_result>'},
+               {"role": "assistant", "content": "done"}]
+    ctx.hooks["pre_llm_call"](session_id="s9", user_message="now run echo", conversation_history=history)
+    assert pre(ctx, "terminal", session="s9")["action"] == "approve"
+
+
+def test_a_stored_result_without_tool_name_is_named_by_the_dispatched_call():
+    ctx = setup()
+    history = [dispatched("call_1", "mcp__mail__read"), {"role": "tool", "tool_call_id": "call_1", "content": "mail"}]
+    ctx.hooks["pre_llm_call"](session_id="s9", user_message="go on", conversation_history=history)
+    assert pre(ctx, "terminal", session="s9")["action"] == "approve"
+
+
+@pytest.mark.parametrize("name, args", [
+    ("terminal", {"command": "curl -s https://example.com"}),
+    ("vision_analyze", {"image_url": "https://img.example/a.png", "question": "?"}),
+])
+def test_a_stored_dispatched_call_that_fetches_is_marked(name, args):
+    ctx = setup()
+    history = [dispatched("call_1", name, args), {"role": "tool", "tool_call_id": "call_1", "tool_name": name, "content": "x"}]
+    ctx.hooks["pre_llm_call"](session_id="s9", user_message="go on", conversation_history=history)
+    assert pre(ctx, "terminal", session="s9")["action"] == "approve"
+
+
+def test_a_stored_history_of_local_tools_only_is_not_marked():
+    ctx = setup()
+    history = [dispatched("call_1", "terminal", {"command": "echo hi"}),
+               {"role": "tool", "tool_call_id": "call_1", "tool_name": "terminal", "content": "hi"},
+               dispatched("call_2", "vision_analyze", {"image_url": "C:/img.png"}),
+               {"role": "tool", "tool_call_id": "call_2", "tool_name": "vision_analyze", "content": "a cat"}]
+    ctx.hooks["pre_llm_call"](session_id="s9", user_message="go on", conversation_history=history)
+    assert pre(ctx, "terminal", session="s9") is None
