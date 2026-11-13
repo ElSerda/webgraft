@@ -2,7 +2,7 @@ name: webgraft
 version: 0.3.0
 manifest_version: 2
 api_version: 1
-description: "Local page and PDF extraction for web_extract, and the pages an answer really used, as clickable sources"
+description: "Local page and document reading for web_extract, and the pages opened for the answer, as clickable sources"
 author: ElSerda
 license: MIT
 requires_hermes: ">=0.22.6"

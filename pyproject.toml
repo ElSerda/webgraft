@@ -16,7 +16,7 @@
 [project]
 name = "webgraft"
 version = "0.3.0"
-description = "Hermes Agent plugin: local page and document reading for web_extract, and the pages an answer used"
+description = "Hermes Agent plugin: local page and document reading for web_extract, and the pages opened for the answer"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [

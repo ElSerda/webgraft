@@ -4,7 +4,7 @@ A Hermes Agent plugin for web answers built from pages that were really read.
 
 - **Reads pages and documents on your machine** for `web_extract` (HTML, PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, RTF, CSV): no API key, no extraction service.
 - **Reports HTTP errors and bot walls as errors**, so the model never takes them for content.
-- **Lists the pages the answer really used**, under the answer, with clickable links. Pages are taken from the tool results, never from the model's text, so the list cannot name a page that was not read.
+- **Lists the pages opened for the answer**, under the answer, with clickable links, and names the pages that could not be read, with their reason. Everything comes from the tool results, never from the model's text, so the list cannot name a page that was not read.
 - **Pushes the model to open pages** instead of answering from search snippets: a bundled skill and a short reminder.
 - **Keeps several pages within the model's context**: one URL per `web_extract` call. Long pages are left to Hermes's own window, which `setup` can widen with your consent. See [What the model sees of a long page](#what-the-model-sees-of-a-long-page).
 
@@ -304,10 +304,10 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
 ## What it does, for review
 
 - **Hooks:**
-  - `pre_llm_call` (starts a record for the turn and, unless `remind` is off, appends the short reminder to the user message)
+  - `pre_llm_call` (starts a record for the turn, notes the pages you attached with `@url:`, and, unless `remind` is off, appends the short reminder to the user message)
   - `pre_tool_call` (for `web_extract`: keeps the first URL of a call that asks for several when `one_url_per_call` is on; for other tools, once the conversation has read web content and unless `tool_guard` is off: sends tools that are not read-only to Hermes's approval prompt, or refuses them with `tool_guard: block`)
-  - `transform_tool_result` (adds the URLs left out to the result of such a call, and a note to a `web_search` result that holds no result)
-  - `post_tool_call` (keeps the text of `web_extract` results and the snippets of `web_search` results)
+  - `transform_tool_result` (adds a note to a `web_extract` result: the URLs left out of such a call, a call that read no page, a page Hermes's keyless rescue served; and to a `web_search` result that holds no result)
+  - `post_tool_call` (records, for the footer, which pages `web_extract` opened or could not read and whether a search ran or was served by the keyless rescue, and marks the conversation for `tool_guard`; no page text is kept)
   - `transform_llm_output` (appends the footer; the answer itself is not changed, so a streamed answer is not printed twice)
 
 - **Web provider:** `webgraft`, extract only.
@@ -342,7 +342,7 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
   - the Chromium path, in `browser.json` next to it;
   - the ids of the conversations that read web content, in `web_sessions.json` next to it (no content; at most 1000; see [Prompt injection](#prompt-injection)).
 
-  Nothing else is stored: no page text is kept (the footer lists the pages of the current turn from its tool results); which sites publish an `llms.txt` stays in memory for an hour; all of it is gone when Hermes stops.
+  Nothing else is stored: no page text is kept (the footer lists the pages of the current turn from its tool results); which sites publish an `llms.txt` stays in memory for an hour; the URLs webgraft could not read, and why, stay in memory for five minutes (at most 500, no content); all of it is gone when Hermes stops.
 
 - **Reads:**
   - `web.extract_char_limit` (for `setup` and `status`) and `display.language` in `config.yaml`;
