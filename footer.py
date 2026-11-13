@@ -48,7 +48,7 @@ def text(key: str) -> str:
     return _TEXT[language()][key]
 
 
-# The second list heading that versions before 0.2.0's footer simplification wrote: still recognised
+# The second list heading that versions up to 0.2.0 wrote (removed in 0.3.0): still recognised
 # in a conversation's history, so the model is told the lists were not its own.
 _OLDER_HEADINGS = ("Also used, opened earlier in this conversation:",
                    "Aussi utilisées, ouvertes plus tôt dans la conversation :")

@@ -1,5 +1,5 @@
 name: webgraft
-version: 0.2.0
+version: 0.3.0
 manifest_version: 2
 api_version: 1
 description: "Local page and PDF extraction for web_extract, and the pages an answer really used, as clickable sources"
