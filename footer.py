@@ -13,6 +13,8 @@ _TEXT = {
         "unread": "Refused or unreadable:",
         "attached": "Attached by you (@url), read before the answer:",
         "rescued": "Read by Hermes's keyless rescue (an outside service), not on this machine:",
+        "search_rescued": "Searched by Hermes's keyless rescue (an outside service), not by your search backend:",
+        "instead_of": "instead of",
     },
     "fr": {
         "sources": "Sources (pages ouvertes) :",
@@ -21,6 +23,8 @@ _TEXT = {
         "unread": "Refusées ou illisibles :",
         "attached": "Jointes par toi (@url), lues avant la réponse :",
         "rescued": "Lues par le secours sans clé d'Hermes (un service extérieur), pas sur cette machine :",
+        "search_rescued": "Recherches faites par le secours sans clé d'Hermes (un service extérieur), pas par ton moteur de recherche :",
+        "instead_of": "à la place de",
     },
 }
 
@@ -94,6 +98,13 @@ def _source_line(url: str, titles: dict[str, str]) -> str:
 MAX_UNREAD = 20  # refused or unreadable pages listed under one answer
 
 
+def _name(text_: str) -> str:
+    """A provider name from a tool result, cleaned like a reason: one short plain word or two."""
+    name = "".join(ch if ch.isprintable() else " " for ch in str(text_)[:100]).translate(_MARKDOWN_CHARS)
+    name = " ".join(w for w in name.split() if "://" not in w and "@" not in w)
+    return name[:40].strip() or "?"
+
+
 def _unread_line(url: str, why: str) -> str:
     """"- https://... (HTTP 403 from origin)": the reason comes from the tool result, cleaned like a title."""
     why = "".join(ch if ch.isprintable() else " " for ch in why[:300]).translate(_MARKDOWN_CHARS)
@@ -105,7 +116,8 @@ def _unread_line(url: str, why: str) -> str:
 
 def build(opened: list[str], searched: bool, titles: dict[str, str] | None = None,
           unread: list[tuple[str, str]] | None = None, attached: list[str] | None = None,
-          rescued: list[tuple[str, str]] | None = None) -> str:
+          rescued: list[tuple[str, str]] | None = None,
+          search_rescued: list[tuple[str, str]] | None = None) -> str:
     """opened: the pages web_extract returned in this turn; unread: (url, why) for the pages it could
     not read; searched: a web_search ran; attached: the pages the user attached with @url:. All from
     the tool results and the user's message: nothing is guessed from the answer. The wording follows
@@ -123,6 +135,9 @@ def build(opened: list[str], searched: bool, titles: dict[str, str] | None = Non
         lines = []
     else:
         return text("no_page")
+    if search_rescued:
+        lines += [text("search_rescued")] + [f"- {_name(vendor)}, {text('instead_of')} {_name(backend)}"
+                                             for vendor, backend in search_rescued[:MAX_UNREAD]]
     if rescued:
         lines += [text("rescued")] + [_unread_line(url, f"here: {why}") for url, why in rescued[:MAX_UNREAD]]
     if attached:

@@ -467,3 +467,33 @@ def test_the_refusal_record_is_short_lived_and_bounded(monkeypatch):
         ex._note_refused(ex.Page(f"https://b.example/{i}", error="x"), f"https://b.example/{i}")
     assert len(ex._refused) == ex.MAX_REFUSED
     ex._refused.clear()
+
+
+# ---------------------------------------------------------------- searches Hermes's keyless rescue served
+
+
+def rescued_search(served_by="exa", rescued_from="searxng"):
+    return json.dumps({"success": True, "data": {"web": [{"title": "A", "url": "https://a.example", "description": "x"}],
+                                                 "served_by": served_by, "rescued_from": rescued_from,
+                                                 "backend_error": "Configured backend 'searxng' failed this call"}})
+
+
+def test_a_search_the_rescue_served_is_named_in_the_footer():
+    ctx = setup()
+    out = run_turn(ctx, "Trois titres.", [("web_search", rescued_search()), ("web_search", rescued_search())])
+    assert out.endswith("Aucune page ouverte : réponse basée sur les extraits de recherche.\n"
+                        "Recherches faites par le secours sans clé d'Hermes (un service extérieur), pas par ton moteur de recherche :\n"
+                        "- exa, à la place de searxng")
+
+
+def test_a_search_your_backend_served_adds_nothing():
+    ctx = setup()
+    out = run_turn(ctx, "Trois titres.", [("web_search", SEARCH)])
+    assert "secours" not in out
+
+
+def test_a_crafted_vendor_name_stays_one_plain_word():
+    ctx = setup()
+    out = run_turn(ctx, "Rien.", [("web_search", rescued_search("[x](https://phish.example)\n# h", "searxng"))])
+    line = out.splitlines()[-1]
+    assert "](" not in line and "phish" not in line and line.endswith("à la place de searxng")

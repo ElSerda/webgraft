@@ -215,7 +215,17 @@ def _attached_urls(message: Any) -> list[str]:
 
 
 def _new_turn() -> dict[str, Any]:
-    return {"opened": [], "titles": {}, "searched": False, "unread": {}, "attached": [], "rescued": {}}
+    return {"opened": [], "titles": {}, "searched": False, "unread": {}, "attached": [], "rescued": {},
+            "search_rescued": []}
+
+
+def _search_rescue(result: Any) -> tuple[str, str] | None:
+    """(vendor, your backend) when Hermes's keyless rescue served a web_search after the configured
+    backend failed: Hermes says so itself in the result (data.served_by, data.rescued_from)."""
+    data = _payload(result).get("data")
+    if not isinstance(data, dict) or not data.get("rescued_from"):
+        return None
+    return str(data.get("served_by") or "keyless free tier"), str(data.get("rescued_from"))
 
 
 def _rescued(result: Any) -> list[tuple[str, str]]:
@@ -662,6 +672,7 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
     pages = _pages(result) if tool_name == "web_extract" else []
     unread = _unread(result) if tool_name == "web_extract" else []
     rescued = dict(_rescued(result)) if tool_name == "web_extract" else {}
+    search_rescue = _search_rescue(result) if tool_name == "web_search" else None
     pages = [p for p in pages if p["url"] not in rescued]
     with _lock:
         turn = _turns.setdefault(session_id, _new_turn())
@@ -670,6 +681,8 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
             _turns.popitem(last=False)
         if tool_name == "web_search":
             turn["searched"] = True
+            if search_rescue and search_rescue not in turn["search_rescued"]:
+                turn["search_rescued"].append(search_rescue)
         for page in pages:
             if page["url"] not in turn["opened"]:
                 turn["opened"].append(page["url"])
@@ -694,7 +707,7 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
         return None  # no web tool this turn: nothing to report
     unread = [(u, w) for u, w in turn["unread"].items() if u not in turn["opened"]]
     text = footer.build(turn["opened"], turn["searched"], turn["titles"], unread, turn["attached"],
-                        list(turn["rescued"].items()))
+                        list(turn["rescued"].items()), turn["search_rescued"])
     # Keep the answer byte for byte: Hermes then prints only the added footer after a streamed reply.
     return f"{response_text}\n\n{text}" if text else None
 
