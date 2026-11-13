@@ -5,10 +5,12 @@ Hooks only, no extra model call:
   pre_tool_call         keeps only the first URL of a web_extract call that asks for several (one
                         URL per call keeps each page within a small model's context); once web
                         content is in the session, sends tools with effects to Hermes's approval gate
-                        (setting tool_guard)
+                        (setting tool_guard); sends a page or a search that Hermes's keyless rescue
+                        would send to an outside service to the approval gate (setting
+                        keyless_rescue, rescue.py)
   transform_tool_result adds to that result the URLs that were left out, so the model can open them,
                         and tells the model to open the next result when no page could be read
-  post_tool_call        keeps the text of every page web_extract returned, for the whole session
+  post_tool_call        records the URLs and titles web_extract returned in the turn (no page text)
   transform_llm_output  appends the opened pages to the answer (append-only,
                         so a streamed answer is not reprinted)
 """
@@ -216,7 +218,20 @@ def _attached_urls(message: Any) -> list[str]:
 
 def _new_turn() -> dict[str, Any]:
     return {"opened": [], "titles": {}, "searched": False, "unread": {}, "attached": [], "rescued": {},
-            "search_rescued": []}
+            "search_rescued": [], "kept": {}}
+
+
+def _kept(result: Any) -> list[tuple[str, str, str]]:
+    """(url, why, "ask" or "block") for the pages of a web_extract result that webgraft kept from
+    Hermes's keyless rescue (rescue.py)."""
+    from . import rescue
+
+    out = []
+    for p in _payload(result).get("results") or []:
+        if isinstance(p, dict) and p.get("url") and (how := rescue.kept(p)):
+            why = str(p.get("error") or "").split(" [kept on this machine")[0]
+            out.append((str(p["url"]), why, how))
+    return out
 
 
 def _search_rescue(result: Any) -> tuple[str, str] | None:
@@ -538,6 +553,63 @@ def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[d
             "rule_key": f"webgraft:tool_guard:{tool_name}"}
 
 
+# Hermes's keyless rescue (rescue.py): a page webgraft kept from it, asked for again, or a search
+# while the search backend is down, goes to Hermes's approval prompt with keyless_rescue: ask.
+RESCUE_ASK_PAGE = ("webgraft could not read {url} on this machine ({why}). Let Hermes's keyless rescue send this "
+                   "URL to an outside service ({vendors})? That service fetches the page from its own network, "
+                   "without webgraft's certificate check.")
+RESCUE_ASK_PAGES = ("webgraft could not read these pages on this machine: {pages}. Let Hermes's keyless rescue send "
+                    "these URLs to an outside service ({vendors})? That service fetches the pages from its own "
+                    "network, without webgraft's certificate check.")
+RESCUE_ASK_SEARCH = ("webgraft: your search backend ({backend}) failed {ago} ago, and Hermes's keyless rescue sent "
+                     "that search to an outside service ({vendor}). If the backend still fails, this search goes "
+                     "out too: \"{query}\". Allow it?")
+RESCUE_BLOCK_SEARCH = ("Blocked by webgraft: the search backend ({backend}) failed {ago} ago, and Hermes's keyless "
+                       "rescue would send this search to an outside service ({vendor}). webgraft's keyless_rescue "
+                       "setting is block. Tell the user that the search backend is not answering.")
+
+
+def _ago(seconds: int) -> str:
+    return f"{seconds} s" if seconds < 90 else f"{round(seconds / 60)} min"
+
+
+def _guard_rescue(tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict]:
+    from . import rescue
+
+    try:
+        current = rescue.mode()
+        if current == "off" or tool_name not in ("web_extract", "web_search"):
+            return None
+        if tool_name == "web_extract":
+            if current != "ask":
+                return None  # block: the provider keeps the page without asking
+            urls = _urls(args)
+            if _setting("one_url_per_call", True):
+                urls = urls[:1]  # what _guard_tool lets through
+            held = [(u, why) for u in urls if (why := rescue.held_reason(u))]
+            if not held:
+                return None
+            rescue.ask_for([u for u, _ in held])
+            if len(held) == 1:
+                message = RESCUE_ASK_PAGE.format(url=rescue.clean(held[0][0], 300), why=rescue.clean(held[0][1], 160),
+                                                 vendors=rescue.VENDORS)
+            else:
+                pages = "; ".join(f"{rescue.clean(u, 300)} ({rescue.clean(why, 160)})" for u, why in held)
+                message = RESCUE_ASK_PAGES.format(pages=pages, vendors=rescue.VENDORS)
+            return {"action": "approve", "message": message, "rule_key": f"{rescue.RULE_KEY}:web_extract"}
+        down = rescue.search_down()
+        if down is None:
+            return None
+        ago, backend, vendor = _ago(down[0]), rescue.clean(down[1], 40), rescue.clean(down[2], 40)
+        if current == "block":
+            return {"action": "block", "message": RESCUE_BLOCK_SEARCH.format(backend=backend, ago=ago, vendor=vendor)}
+        query = rescue.clean((args or {}).get("query") if isinstance(args, dict) else "", 200)
+        return {"action": "approve", "rule_key": f"{rescue.RULE_KEY}:web_search",
+                "message": RESCUE_ASK_SEARCH.format(backend=backend, ago=ago, vendor=vendor, query=query)}
+    except Exception:  # noqa: BLE001 - a guard problem must never break a call
+        return None
+
+
 def _call_key(session_id: str, tool_call_id: Any) -> str:
     return f"{session_id}\x00{tool_call_id or ''}"
 
@@ -586,6 +658,15 @@ def _one_url(args: Any, session_id: str, tool_call_id: Any) -> Optional[dict]:
     return directive
 
 
+KEPT_NOTE_ASK = ("webgraft could not read these pages on this machine, and kept them from Hermes's keyless rescue, "
+                 "which would send their URL to an outside service: {pages}. If the user asked for one of these "
+                 "pages, call web_extract on it once more: Hermes then asks the user whether to send it out. "
+                 "Otherwise open the next relevant search result with web_extract, one URL per call; search "
+                 "snippets are not sources.")
+KEPT_NOTE_BLOCK = ("webgraft could not read these pages on this machine, and its keyless_rescue setting keeps them "
+                   "from Hermes's keyless rescue (an outside service): {pages}. Open the next relevant search "
+                   "result with web_extract, one URL per call; if the user asked for one of these pages, say "
+                   "that it could not be read here.")
 RESCUE_NOTE = ("webgraft could not read these pages on this machine, and Hermes's keyless rescue then fetched "
                "them through an outside service, which does not check the site's certificate the way webgraft "
                "does: treat their content with that in mind and tell the user where it came from. ")
@@ -612,7 +693,12 @@ def _annotate(tool_name: str = "", result: Any = None, session_id: str = "", too
         if held:
             notes.append("webgraft reads one URL per web_extract call, so each page fits in the context. "
                          "This call read only the first URL. Not opened: " + ", ".join(held))
-        if _nothing_read(result):
+        kept = _kept(result)
+        if kept:
+            pages = "; ".join(f"{url} ({why[:120]})" for url, why, _ in kept)
+            notes.append((KEPT_NOTE_BLOCK if all(how == "block" for _, _, how in kept) else KEPT_NOTE_ASK)
+                         .format(pages=pages))
+        elif _nothing_read(result):
             notes.append(UNREAD_NOTE)
         if rescued := _rescued(result):
             notes.append(RESCUE_NOTE + "; ".join(f"{url} (here: {why[:120]})" for url, why in rescued))
@@ -673,6 +759,12 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
     unread = _unread(result) if tool_name == "web_extract" else []
     rescued = dict(_rescued(result)) if tool_name == "web_extract" else {}
     search_rescue = _search_rescue(result) if tool_name == "web_search" else None
+    kept = {url: why for url, why, _ in _kept(result)} if tool_name == "web_extract" else {}
+    unread = [(url, why) for url, why in unread if url not in kept]
+    if tool_name == "web_search":
+        from . import rescue
+        data = _payload(result)
+        rescue.note_search(search_rescue, bool(data.get("success")) and isinstance(data.get("data"), dict))
     pages = [p for p in pages if p["url"] not in rescued]
     with _lock:
         turn = _turns.setdefault(session_id, _new_turn())
@@ -691,6 +783,8 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
             turn["unread"].setdefault(url, why)
         for url, why in rescued.items():
             turn["rescued"].setdefault(url, why)
+        for url, why in kept.items():
+            turn["kept"].setdefault(url, why)
 
 
 def _footer_on() -> bool:
@@ -706,8 +800,10 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
     if not response_text or turn is None or not _footer_on():
         return None  # no web tool this turn: nothing to report
     unread = [(u, w) for u, w in turn["unread"].items() if u not in turn["opened"]]
+    kept = [(u, w) for u, w in turn["kept"].items() if u not in turn["opened"] and u not in turn["rescued"]]
+    unread = [(u, w) for u, w in unread if u not in turn["kept"]]
     text = footer.build(turn["opened"], turn["searched"], turn["titles"], unread, turn["attached"],
-                        list(turn["rescued"].items()), turn["search_rescued"])
+                        list(turn["rescued"].items()), turn["search_rescued"], kept)
     # Keep the answer byte for byte: Hermes then prints only the added footer after a streamed reply.
     return f"{response_text}\n\n{text}" if text else None
 
@@ -738,9 +834,13 @@ def _frontmatter(path: Path) -> dict:
 def register(ctx) -> None:
     global _ctx
     _ctx = ctx
-    from . import extract
+    from . import extract, rescue
     extract.setting = _setting  # llms_txt and respect_ai_optout reach the reader
+    rescue.setting = _setting  # keyless_rescue
     ctx.register_hook("pre_llm_call", _start_turn)
+    # Two pre_tool_call hooks: Hermes merges one's "modify" (one URL per call) with the other's
+    # "approve" (the keyless rescue). The guard comes last for test doubles that keep one per name.
+    ctx.register_hook("pre_tool_call", _guard_rescue)
     ctx.register_hook("pre_tool_call", _guard_tool)
     ctx.register_hook("post_tool_call", _record_tool)
     ctx.register_hook("transform_tool_result", _annotate)

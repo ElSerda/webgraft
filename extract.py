@@ -962,6 +962,15 @@ def _note_refused(page: Page, requested: str) -> None:
             _refused.popitem(last=False)
 
 
+def note_refused_url(url: str, why: str) -> None:
+    """Like _note_refused, for a failure that has no Page (a whole call that failed or was stopped)."""
+    with _refused_lock:
+        _refused[_url_key(url)] = (time.monotonic(), why)
+        _refused.move_to_end(_url_key(url))
+        while len(_refused) > MAX_REFUSED:
+            _refused.popitem(last=False)
+
+
 def refused_here(url: str) -> str:
     """Why webgraft could not read this page in the last few minutes, or an empty string."""
     with _refused_lock:

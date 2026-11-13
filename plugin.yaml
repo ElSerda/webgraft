@@ -43,6 +43,12 @@ config_schema:
     default: ask
     label: Guard tools after web content
     description: "A web page can hold instructions aimed at the assistant. Once the conversation has read web or MCP content, tools that are not read-only (terminal, code, browser, file writes, messages, session_search, and file, image or video reads outside the folders where Hermes keeps fetched pages) go to Hermes's approval prompt (ask; refused where nobody can answer, such as -Q or cron) or are refused (block). Under --yolo or approvals off Hermes approves by itself: use block"
+  keyless_rescue:
+    type: str
+    choices: [ask, block, off]
+    default: ask
+    label: Ask before Hermes's keyless rescue
+    description: "When webgraft cannot read a page (or the search backend fails), Hermes's keyless rescue (web.keyless_rescue, on by default) sends the URL or the search to an outside service: Exa, Parallel, Firecrawl or Keenable. ask: webgraft keeps the page here, and the model can ask for it again, which goes to Hermes's approval prompt; after a rescued search, the next searches are asked about until the backend answers again. block: never sent. off: Hermes decides. Under --yolo or approvals off Hermes approves by itself: use block"
   respect_ai_optout:
     type: bool
     default: true
