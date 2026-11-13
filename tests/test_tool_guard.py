@@ -54,7 +54,8 @@ def test_nothing_is_asked_before_any_web_content():
 
 
 @pytest.mark.parametrize("tool", ["terminal", "execute_code", "write_file", "patch", "browser_exec",
-                                  "delegate_task", "memory", "send_message", "some_future_tool"])
+                                  "delegate_task", "memory", "send_message", "some_future_tool",
+                                  "session_search", "mcp_github_create_issue"])
 def test_after_a_page_tools_with_effects_go_to_the_approval_gate(tool):
     ctx = setup()
     read_a_page(ctx)
@@ -79,7 +80,7 @@ def test_web_extract_keeps_its_own_behaviour_after_web_content():
     assert out["action"] == "modify"
 
 
-@pytest.mark.parametrize("tool", ["web_search", "x_search", "browser_cdp", "browser_exec"])
+@pytest.mark.parametrize("tool", ["web_search", "x_search", "browser_cdp", "browser_exec", "mcp_fetch_fetch"])
 def test_every_web_tool_marks_the_conversation(tool):
     ctx = setup()
     read_a_page(ctx, tool=tool, result="{}")
@@ -315,3 +316,78 @@ def test_block_mode_blocks_reads_outside_the_cache_too(home):
     read_a_page(ctx)
     assert pre(ctx, "read_file", args={"path": str(home / ".ssh" / "id_ed25519")})["action"] == "block"
     assert pre(ctx, "read_file", args={"path": str(home / "cache" / "web" / "page.md")}) is None
+
+
+# ---------------------------------------------------------------- images, videos, MCP, earlier sessions
+
+
+@pytest.mark.parametrize("tool, key", [("vision_analyze", "image_url"), ("video_analyze", "video_url")])
+def test_an_image_or_video_from_a_url_marks_the_conversation(tool, key):
+    ctx = setup()
+    ctx.hooks["post_tool_call"](tool_name=tool, args={key: " HTTPS://img.example/a.png", "question": "?"},
+                                result="a cat", session_id="s1")
+    assert pre(ctx, "terminal")["action"] == "approve"
+
+
+@pytest.mark.parametrize("source", ["C:/Users/me/photo.png", "file:///tmp/a.png", "data:image/png;base64,AAAA", ""])
+def test_a_local_or_inline_image_does_not_mark_it(source):
+    ctx = setup()
+    ctx.hooks["post_tool_call"](tool_name="vision_analyze", args={"image_url": source, "question": "see https://x.example"},
+                                result="a cat", session_id="s1")
+    assert pre(ctx, "terminal") is None
+
+
+@pytest.mark.parametrize("tool, key", [("vision_analyze", "image_url"), ("video_analyze", "video_url")])
+def test_after_web_content_images_from_urls_or_inline_stay_free(tool, key):
+    ctx = setup()
+    read_a_page(ctx)
+    assert pre(ctx, tool, args={key: "https://img.example/a.png"}) is None
+    assert pre(ctx, tool, args={key: "data:image/png;base64,AAAA"}) is None
+
+
+@pytest.mark.parametrize("tool, key", [("vision_analyze", "image_url"), ("video_analyze", "video_url")])
+def test_after_web_content_a_local_image_or_video_goes_to_the_approval_gate(home, tool, key):
+    ctx = setup()
+    read_a_page(ctx)
+    path = str(home / "cache" / "web" / "shot.png")  # no free folder for images
+    out = pre(ctx, tool, args={key: "file://" + path})
+    assert out["action"] == "approve" and f"{tool} on {path}" in out["message"]
+    assert pre(ctx, tool, args={})["action"] == "approve"
+
+
+def test_block_mode_blocks_local_images_and_earlier_sessions():
+    ctx = setup({"tool_guard": "block"})
+    read_a_page(ctx)
+    assert pre(ctx, "vision_analyze", args={"image_url": "/home/me/id.png"})["action"] == "block"
+    assert pre(ctx, "session_search", args={"query": "password"})["action"] == "block"
+    assert pre(ctx, "vision_analyze", args={"image_url": "https://img.example/a.png"}) is None
+
+
+def test_the_prompt_says_mcp_results_count():
+    ctx = setup()
+    ctx.hooks["post_tool_call"](tool_name="mcp_mail_read", args={}, result="mail text", session_id="s1")
+    assert "MCP" in pre(ctx, "terminal")["message"]
+
+
+@pytest.mark.parametrize("call, result_name", [
+    ({"name": "vision_analyze", "arguments": json.dumps({"image_url": "https://img.example/a.png"})}, None),
+    ({"name": "mcp_fetch_fetch", "arguments": "{}"}, None),
+    ({"name": "something", "arguments": "{}"}, "mcp_fetch_fetch"),  # the name on the tool message counts
+])
+def test_a_resumed_conversation_with_an_image_url_or_mcp_result_is_marked(call, result_name):
+    ctx = setup()
+    tool_message = {"role": "tool", "tool_call_id": "t1", "content": "text"}
+    if result_name:
+        tool_message["name"] = result_name
+    history = [{"role": "assistant", "tool_calls": [{"id": "t1", "function": call}]}, tool_message]
+    ctx.hooks["pre_llm_call"](session_id="s9", user_message="go on", conversation_history=history)
+    assert pre(ctx, "terminal", session="s9")["action"] == "approve"
+
+
+def test_a_resumed_conversation_with_a_local_image_is_not_marked():
+    ctx = setup()
+    history = [{"role": "assistant", "tool_calls": [{"id": "t1", "function": {
+                   "name": "vision_analyze", "arguments": json.dumps({"image_url": "/home/me/a.png"})}}]},
+               {"role": "tool", "tool_call_id": "t1", "content": "a cat"}]
+    ctx.hooks["pre_llm_call"](session_id="s9", user_message="go on", conversation_history=history)
+    assert pre(ctx, "terminal", session="s9") is None

@@ -145,7 +145,7 @@ Requests for the Hermes maintainers, so plugins would not have to work around th
 - **Which plugins rewrite replies.** Hermes keeps the first non-empty `transform_llm_output` rewrite and gives a plugin no documented way to know whether another enabled plugin registers that hook. A public query (or a way to append rather than replace) would let a footer plugin step aside or combine instead of asking the user to choose.
 - **Redirect checks behind a proxy.** The security guide promises that redirect chains are re-validated at each hop, but the public `create_ssrf_safe_async_client` leaves proxied hops to the proxy. A public option or helper for that check would replace webgraft's own response hook.
 - **Hermes's Chromium.** webgraft follows the documented order ([Which Chromium](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser)) but cannot call Hermes's own resolver, which is not in the public plugin API. So it guesses the folder layout inside `hermes pm env chromium`'s browsers folder, and it looks for a system `chromium` on `PATH` last on every platform, where Hermes does so only where its package manager ships no Chromium. A public accessor is requested in [#154413](https://github.com/NousResearch/hermes-agent/issues/154413).
-- **Approval after untrusted content.** `tool_guard` asks for approval after any web content; Hermes itself could do it for every untrusted source (MCP results, mail, attachments too). Requested in [#147969](https://github.com/NousResearch/hermes-agent/issues/147969); webgraft's guard would then step aside.
+- **Approval after untrusted content.** `tool_guard` asks for approval after web content and MCP results, recognised by tool name from outside; Hermes itself could track every untrusted source (mail, attachments, tools added later). Requested in [#147969](https://github.com/NousResearch/hermes-agent/issues/147969); webgraft's guard would then step aside.
 - **The extract cache.** The 20-minute extract cache is documented for users ([Result caching](https://hermes-agent.nousresearch.com/docs/user-guide/features/web-search#result-caching)) but not in the web provider plugin guide: a provider is not told that a cache hit can skip it, and the `cached` flag Hermes sets on a hit is dropped before the result reaches plugin hooks.
 
 ## Which pages are listed
@@ -179,15 +179,19 @@ Local test site with injected pages (a code word to start the reply with, a URL 
 
 ### What webgraft adds: `tool_guard` (on by default)
 
-- **When:** once the conversation has read web content (a result of `web_search`, `web_extract`, `x_search` or a `browser_*` tool), also after a restart or a resumed conversation.
+- **When:** once the conversation has read web content (a result of `web_search`, `web_extract`, `x_search`, a `browser_*` tool or an MCP tool `mcp_*`, the results Hermes itself marks as untrusted), also after a restart or a resumed conversation.
+  - `vision_analyze` and `video_analyze` on an `http://` or `https://` URL count too: they download it, Hermes does not mark the result as untrusted, and an image can hold text.
   - A command or a script that holds an `http://` or `https://` URL counts too (`terminal`, `process_manage`, `execute_code`): `curl`, `wget`, `git clone`, `urllib`. It is judged on the call, not on what came back, so a `git clone https://…` or a `curl` to a local server also turns the guard on.
   - Tools that `execute_code` runs for a script count too: Hermes gives them no session id, so webgraft finds the conversation through the task id the model's own calls carry.
   - A subagent reads in its own session: when a web tool ran while a `delegate_task` was out, its result marks the conversation it returns to.
 - **What:** every tool that is not read-only goes to Hermes's own approval prompt, through the documented `pre_tool_call` `approve` directive:
   - terminal, code execution, the browser, file writes, memory, messages, subagents, and any tool not on the read-only list below, including tools added later;
   - where nobody can answer (`hermes chat -Q`, cron), Hermes refuses the call.
-- **Stays free:** `web_search`, `web_extract`, `x_search`, `skill_view`, `skills_list`, `session_search`, `todo_list`, `clarify`, `vision_analyze`, `video_analyze`. Research works as before.
+- **Stays free:** `web_search`, `web_extract`, `x_search`, `skill_view`, `skills_list`, `todo_list`, `clarify`, and `vision_analyze` / `video_analyze` on a URL or inline `data:`. Research works as before.
 - **Local reads are scoped:** reading a file is the first half of "read a secret, then put it in a URL". After web content, `read_file` stays free only in the folders where Hermes keeps what it fetched (`HERMES_HOME/cache/web` and `cache/spillover`, so the rest of a long page can still be read), and `search_files` only in `cache/web` (`cache/spillover` also holds other tools' and other sessions' output). Any other path, or a relative one, goes to the approval prompt, which shows it.
+  - `vision_analyze` and `video_analyze` on a local file go to the approval prompt too, with the path (no free folder: `cache/images` holds images users sent).
+  - `session_search` reads your earlier conversations: it goes to the approval prompt as well.
+  - Hermes masks secrets shaped like keys and tokens in tool output; it does not mask other private details.
   - Hermes already refuses to read its own credential stores (`auth.json`, `.env` files, MCP tokens, its browser profile and vault) and masks secrets in its `config.yaml`; it does not protect other secrets on the machine, such as `~/.ssh` or `~/.aws`.
   - Seen in testing: after `terminal` was refused, a cloud model went on with the free tools and read Hermes's `config.yaml`, webgraft's code and Hermes's approval code, looking for a way around the refusal.
 - **Tested** through the gateway: after reading a public page, `terminal` was refused, and so was the model's next try, `execute_code`. Without web content in the conversation, webgraft does not intervene.

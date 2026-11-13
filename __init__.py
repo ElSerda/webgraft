@@ -222,9 +222,14 @@ _held: "OrderedDict[str, list[str]]" = OrderedDict()  # tool call -> URLs left o
 # in a session it stays in the context, so from then on every tool that is not read-only goes to
 # Hermes's own approval gate ("approve"; nobody to answer, as in -Q or cron, means refused), or is
 # refused ("block", which also holds under --yolo, where Hermes approves everything itself).
-# Tools that bring web content into the session (Hermes wraps their results as untrusted data):
+# Tools that bring web content into the session: Hermes's untrusted set (web_search, web_extract and
+# the browser_ and mcp_ tools, whose results it wraps as untrusted data; an MCP server can relay a
+# page, a ticket or a mail), plus x_search.
 WEB_TOOLS = frozenset({"web_search", "web_extract", "x_search"})
-WEB_TOOL_PREFIX = "browser_"
+WEB_TOOL_PREFIXES = ("browser_", "mcp_")
+# vision_analyze and video_analyze take a URL (they download it: web content, which Hermes does not
+# wrap, and an image can hold text) or a local file path (a local read, scoped like read_file).
+MEDIA_TOOLS = {"vision_analyze": "image_url", "video_analyze": "video_url"}
 # A command or a script can fetch a page too (curl, git clone, urllib): a URL in it counts as reading
 # the web. Judged on the call, not on its output, like the tools above.
 COMMAND_TOOLS = frozenset({"terminal", "process_manage", "execute_code"})
@@ -232,16 +237,18 @@ COMMAND_TOOLS = frozenset({"terminal", "process_manage", "execute_code"})
 # one added later, counts as having effects.
 READ_ONLY_TOOLS = frozenset({
     "web_search", "web_extract", "x_search",
-    "skill_view", "skills_list",
-    "session_search", "todo_list", "clarify",
-    "vision_analyze", "video_analyze",
+    "skill_view", "skills_list", "todo_list", "clarify",
 })
 # Reading local files is the first half of "read a secret, then put it in a URL": after web content,
 # read_file and search_files stay free only where Hermes keeps what it fetched (documented:
 # HERMES_HOME/cache/web for web_extract text, cache/spillover for oversized tool results, which
 # read_file pages through). search_files is not free in cache/spillover, which holds other tools' and
-# other sessions' output too.
-PATH_READ_TOOLS = {"read_file": (("cache", "web"), ("cache", "spillover")), "search_files": (("cache", "web"),)}
+# other sessions' output too. session_search (earlier conversations) is a local read with no fetched
+# part: it goes to the approval prompt. vision_analyze / video_analyze on a local file have no free
+# folder (cache/images holds images users sent): only a URL or inline data: stays free.
+PATH_READ_TOOLS = {"read_file": (("cache", "web"), ("cache", "spillover")), "search_files": (("cache", "web"),),
+                   "vision_analyze": (), "video_analyze": ()}
+PATH_ARGS = {"read_file": "path", "search_files": "path", **MEDIA_TOOLS}
 MAX_WEB_SESSIONS = 1000  # session ids only; each turn also rechecks Hermes's history
 _web_sessions: "OrderedDict[str, None]" = OrderedDict()
 # Tools that execute_code runs for a script reach the hooks with task_id only (no session_id);
@@ -251,8 +258,8 @@ _task_sessions: "OrderedDict[str, str]" = OrderedDict()
 # reads are counted, and a delegate_task during which any web tool ran marks the parent.
 _web_reads = 0
 _delegations: "OrderedDict[str, int]" = OrderedDict()  # delegate_task call -> web reads at its start
-GUARD_ASK = ("webgraft: this conversation has read web pages or search results, and a page can hold "
-             "instructions aimed at the assistant. Approve {tool} only if it does what you asked for. "
+GUARD_ASK = ("webgraft: this conversation has read web pages, search results or MCP tool results, and "
+             "they can hold instructions aimed at the assistant. Approve {tool} only if it does what you asked for. "
              "(webgraft setting tool_guard)")
 GUARD_BLOCK = ("Blocked by webgraft: this conversation has read web content, and its tool_guard setting "
                "refuses tools with effects after that, because a web page can hold instructions aimed at you. "
@@ -260,11 +267,31 @@ GUARD_BLOCK = ("Blocked by webgraft: this conversation has read web content, and
                "can do it themselves or change tool_guard.")
 
 
+def _args_dict(args: Any) -> dict:
+    """A call's arguments as a dict (Hermes's history keeps them as a JSON string)."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return {}
+    return args if isinstance(args, dict) else {}
+
+
+def _media_source(tool_name: str, args: Any) -> str:
+    """What vision_analyze / video_analyze is asked to load: "web", "inline" (data:) or "file"."""
+    source = str(_args_dict(args).get(MEDIA_TOOLS[tool_name]) or "").strip().lower()
+    if source.startswith(("http://", "https://")):
+        return "web"
+    return "inline" if source.startswith("data:") else "file"
+
+
 def _brings_web(tool_name: str, args: Any = None) -> bool:
-    """Whether a call brings web content into the conversation: a web tool, or a command or script
-    that holds an http(s) URL."""
-    if tool_name in WEB_TOOLS or tool_name.startswith(WEB_TOOL_PREFIX):
+    """Whether a call brings web content into the conversation: a web tool, vision_analyze /
+    video_analyze on a URL, or a command or script that holds an http(s) URL."""
+    if tool_name in WEB_TOOLS or tool_name.startswith(WEB_TOOL_PREFIXES):
         return True
+    if tool_name in MEDIA_TOOLS:
+        return args is not None and _media_source(tool_name, args) == "web"
     if tool_name not in COMMAND_TOOLS or args is None:
         return False
     try:
@@ -310,7 +337,7 @@ def _web_in_history(history: Any) -> bool:
                 fn = call.get("function") or {}
                 name = str(fn.get("name") or call.get("name") or "")
                 names[str(call.get("id"))] = name
-                if name in COMMAND_TOOLS and _brings_web(name, fn.get("arguments")):
+                if (name in COMMAND_TOOLS or name in MEDIA_TOOLS) and _brings_web(name, fn.get("arguments")):
                     return True
         if message.get("role") == "tool":
             name = str(message.get("name") or names.get(str(message.get("tool_call_id")), ""))
@@ -336,14 +363,20 @@ def _hermes_home() -> Optional[Path]:
         return None
 
 
+def _read_path(tool_name: str, args: Any) -> str:
+    path = _args_dict(args).get(PATH_ARGS[tool_name])
+    path = path.strip() if isinstance(path, str) else ""
+    return path.removeprefix("file://") if tool_name in MEDIA_TOOLS else path
+
+
 def _fetched_folder(tool_name: str, args: Any) -> bool:
-    """Whether a read_file / search_files call targets a folder where Hermes keeps fetched content.
+    """Whether a local read targets a folder where Hermes keeps fetched content.
     A relative path, or one that leaves the folder (.., a link), does not count."""
-    path = (args or {}).get("path") if isinstance(args, dict) else None
+    path = _read_path(tool_name, args)
     home = _hermes_home()
-    if not isinstance(path, str) or not path.strip() or home is None:
+    if not path or home is None:
         return False
-    target = Path(path.strip()).expanduser()
+    target = Path(path).expanduser()
     if not target.is_absolute():
         return False
     real = os.path.normcase(os.path.realpath(target))
@@ -363,6 +396,8 @@ def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[d
     with _lock:
         if session_id not in _web_sessions:
             return None
+    if tool_name in MEDIA_TOOLS and _media_source(tool_name, args) != "file":
+        return None  # a URL is a web read, free like web_extract; data: is inline, no read
     if tool_name in PATH_READ_TOOLS and _fetched_folder(tool_name, args):
         return None
     if mode == "block":
@@ -370,7 +405,7 @@ def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[d
     what = tool_name or "this tool"
     if tool_name in PATH_READ_TOOLS:
         # The path comes from the model, maybe from a page: no control characters in the prompt.
-        path = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str((args or {}).get("path") or "the current folder"))[:300]
+        path = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", _read_path(tool_name, args) or "the current folder")[:300]
         what = f"{tool_name} on {path}"
     return {"action": "approve", "message": GUARD_ASK.format(tool=what),
             "rule_key": f"webgraft:tool_guard:{tool_name}"}
