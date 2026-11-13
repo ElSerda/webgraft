@@ -12,6 +12,11 @@
 #   2. pinned-source-validate  scripts/ci/catalog_validate_pinned_entries.py
 #      (clones the entry's repo at its pinned sha, symlink / payload / self-updater checks,
 #       hermes plugins validate --install-deps)
+# then a step of webgraft's own, not part of Nous's CI:
+#   3. preview  website/scripts/extract-plugins.py on the entry alone, as the docs deploy publishes it:
+#      what Hermes Desktop / CLI and the /docs/plugins page will show (tools/catalog_preview.py),
+#      and webgraft's rule that the description stays one short line (the disclosure goes in the
+#      PR and the README, rule 13).
 # The Python version and the ruamel.yaml pin are read from their workflow, in a throwaway uv venv.
 # If Nous changes that workflow, the run stops and says so: read the change, then update this file.
 # tools/catalog_ci_windows.py adapts their Linux script to Windows without changing it.
@@ -32,7 +37,7 @@ if [ "${KEEP:-0}" = 1 ]; then trap 'echo "Hermes tree kept: $TREE"' EXIT; else t
 
 echo "== Cloning $UPSTREAM (main, sparse, shallow)"
 git clone -q --depth 1 --filter=blob:none --sparse "$UPSTREAM" "$TREE"
-git -C "$TREE" sparse-checkout set scripts plugin-catalog .github/workflows
+git -C "$TREE" sparse-checkout set scripts plugin-catalog .github/workflows website/scripts
 HEAD_SHA="$(git -C "$TREE" rev-parse HEAD)"
 echo "   main at $HEAD_SHA ($(git -C "$TREE" log -1 --format=%cd))"
 echo "   browse it: $UPSTREAM/tree/$HEAD_SHA"
@@ -67,10 +72,19 @@ echo "   python $("$PY" -c 'import platform; print(platform.python_version())'),
 export GIT_TIMEOUT_EXE="$(cygpath -w "$(command -v timeout)")"
 export PYTHONIOENCODING=utf-8
 
-echo "== 1/2 structural"
+echo "== 1/3 structural"
 (cd "$TREE" && "$PY" scripts/validate_plugin_catalog.py plugin-catalog/)
 
-echo "== 2/2 pinned-source-validate ($NAME)"
+echo "== 2/3 pinned-source-validate ($NAME)"
 CHANGED_FILES="plugin-catalog/$NAME" "$PY" -I "$(cygpath -w "$HERE/catalog_ci_windows.py")" "$(cygpath -w "$TREE")"
 
-echo "== Local Plugin Catalog CI passed for $NAME"
+echo "== Nous's Plugin Catalog CI passed locally for $NAME"
+
+echo "== 3/3 preview (webgraft's own step): what Hermes and the catalog page will show"
+ONE="$WORK/one-entry"
+mkdir -p "$ONE"
+cp "$TREE/plugin-catalog/$NAME" "$ONE/"
+(cd "$TREE" && "$PY" website/scripts/extract-plugins.py --catalog-dir "$(cygpath -w "$ONE")" --output-dir "$(cygpath -w "$WORK/preview")") | sed 's/^/   /'
+"$PY" -I "$(cygpath -w "$HERE/catalog_preview.py")" "$(cygpath -w "$WORK/preview")"
+
+echo "== Local catalog checks passed for $NAME"

@@ -418,6 +418,7 @@ bash tools/catalog_ci.sh path/to/webgraft.yaml
 ```
 
 - **What it runs:** Hermes's own "Plugin Catalog CI" checks, from a fresh clone of Hermes's `main`: the structural validator, then the pinned-source gate (clone at the pinned sha, symlink, payload and self-updater checks, `hermes plugins validate --install-deps`).
+- **Then a preview of webgraft's own:** Hermes's `website/scripts/extract-plugins.py`, run on the entry alone, builds what the docs deploy publishes. The script shows what Hermes Desktop, the CLI and the `/docs/plugins` page will get (name, version, description, and an estimate of the card and detail window), and fails when the description is longer than 400 characters or spans several lines: the schema asks for a one-line description, and the disclosure goes in the PR and this README (rule 13). Not part of Nous's CI.
 - **Same tools as the workflow:** the Python version and `ruamel.yaml` pin are read from Hermes's workflow file, in a throwaway environment.
 - **If Hermes changes its workflow,** the script stops and says so, rather than passing on old rules.
 - **No argument:** checks the entry already published on Hermes's `main`.
