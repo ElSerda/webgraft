@@ -84,22 +84,49 @@ def test_search_only_turn_says_so():
     assert out.endswith("Aucune page ouverte : réponse basée sur les extraits de recherche.")
 
 
-def test_failed_pages_are_not_listed():
+def test_failed_pages_are_not_sources_but_are_named_with_their_reason():
     ctx = setup()
-    failed = {"url": "https://blocked.example", "content": "", "error": "403"}
+    failed = {"url": "https://blocked.example", "content": "", "error": "HTTP 403 from origin"}
     out = run_turn(ctx, "L'agent dispose de 4 Go de mémoire vive et de 25 Go de disque.", [("web_extract", extract_result(failed))])
-    assert "blocked.example" not in out
-    assert out.endswith("Aucune page n'a pu être lue.")
+    assert out.endswith("Aucune page n'a pu être lue.\nRefusées ou illisibles :\n"
+                        "- https://blocked.example (HTTP 403 from origin)")
+    assert "Sources (pages ouvertes)" not in out
 
 
-def test_bot_wall_returned_as_content_is_not_a_source():
+def test_a_bot_wall_returned_as_content_is_named_not_listed_as_a_source():
     # Hermes's keyless rescue can bring a bot wall back as page content.
     ctx = setup()
     wall = {"url": "https://wall.example/plans", "title": "Plans | Wall",
             "content": "# Plans\n\n# Automated bot check in progress\n\nDrag the handle to the target"}
     out = run_turn(ctx, "The Plus plan costs $20.", [("web_extract", extract_result(wall, PAGE))])
-    assert "wall.example" not in out
-    assert "portal.example" in out
+    sources, refused = out.split("Refusées ou illisibles :")
+    assert "portal.example" in sources and "wall.example" not in sources
+    assert "- https://wall.example/plans (bot wall" in refused
+
+
+def test_every_refused_page_of_a_long_turn_is_named_once_and_bounded():
+    ctx = setup()
+    tools = [("web_extract", extract_result({"url": f"https://shop{i}.example/x", "content": "", "error": "HTTP 403 from origin"}))
+             for i in range(30)]
+    tools.append(("web_extract", extract_result({"url": "https://shop0.example/x", "content": "", "error": "HTTP 403 from origin"})))
+    out = run_turn(ctx, "Rien.", tools)
+    listed = [line for line in out.splitlines() if line.startswith("- https://shop")]
+    assert len(listed) == 20 and listed[0] == "- https://shop0.example/x (HTTP 403 from origin)"
+
+
+def test_a_page_read_after_a_failed_try_is_a_source_only():
+    ctx = setup()
+    failed = {"url": "https://portal.example/cloud", "content": "", "error": "HTTP 503 from origin"}
+    out = run_turn(ctx, "La formule Plus coûte 20 $.", [("web_extract", extract_result(failed)), ("web_extract", extract_result(PAGE))])
+    assert "Refusées ou illisibles" not in out and "portal.example/cloud" in out
+
+
+def test_a_crafted_reason_cannot_add_markdown_or_lines():
+    ctx = setup()
+    failed = {"url": "https://x.example", "content": "", "error": "403 [click](https://phish.example)\n# heading" + "x" * 200}
+    out = run_turn(ctx, "Rien.", [("web_extract", extract_result(failed))])
+    line = out.splitlines()[-1]
+    assert line.startswith("- https://x.example (403") and "](" not in line and line.endswith("...)")
 
 
 def test_turn_without_web_tools_is_left_alone():

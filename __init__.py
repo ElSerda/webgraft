@@ -69,6 +69,23 @@ def _pages(result: Any) -> list[dict]:
     ]
 
 
+def _unread(result: Any) -> list[tuple[str, str]]:
+    """(url, why) for each page a web_extract result did not read: its error (HTTP status, bot wall,
+    AI opt-out...), or a bot wall another backend returned as content."""
+    from .extract import looks_blocked
+
+    out = []
+    for p in _payload(result).get("results") or []:
+        if not isinstance(p, dict) or not p.get("url"):
+            continue
+        title, content = str(p.get("title") or ""), str(p.get("content") or "")
+        if p.get("error"):
+            out.append((str(p["url"]), str(p["error"])))
+        elif content and (wall := looks_blocked(title, content)):
+            out.append((str(p["url"]), wall))
+    return out
+
+
 # Added to the user's message, a trusted position: inside a tool result Hermes marks text as data
 # the model must not follow. Small models otherwise answer from snippets that happen to hold numbers.
 # Said to be a note, not the request: a model given a bare URL and this text once took the text
@@ -599,8 +616,9 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
     if tool_name not in ("web_search", "web_extract"):
         return
     pages = _pages(result) if tool_name == "web_extract" else []
+    unread = _unread(result) if tool_name == "web_extract" else []
     with _lock:
-        turn = _turns.setdefault(session_id, {"opened": [], "titles": {}, "searched": False})
+        turn = _turns.setdefault(session_id, {"opened": [], "titles": {}, "searched": False, "unread": {}})
         _turns.move_to_end(session_id)
         while len(_turns) > MAX_SESSIONS:
             _turns.popitem(last=False)
@@ -610,6 +628,8 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
             if page["url"] not in turn["opened"]:
                 turn["opened"].append(page["url"])
                 turn["titles"][page["url"]] = page["title"]
+        for url, why in unread:
+            turn["unread"].setdefault(url, why)
 
 
 def _footer_on() -> bool:
@@ -624,7 +644,8 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
         turn = _turns.pop(session_id, None)
     if not response_text or turn is None or not _footer_on():
         return None  # no web tool this turn: nothing to report
-    text = footer.build(turn["opened"], turn["searched"], turn["titles"])
+    unread = [(u, w) for u, w in turn["unread"].items() if u not in turn["opened"]]
+    text = footer.build(turn["opened"], turn["searched"], turn["titles"], unread)
     # Keep the answer byte for byte: Hermes then prints only the added footer after a streamed reply.
     return f"{response_text}\n\n{text}" if text else None
 

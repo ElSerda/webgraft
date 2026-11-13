@@ -10,11 +10,13 @@ _TEXT = {
         "sources": "Sources (opened pages):",
         "snippets": "No page opened: this answer relies on search snippets only.",
         "no_page": "No page could be read.",
+        "unread": "Refused or unreadable:",
     },
     "fr": {
         "sources": "Sources (pages ouvertes) :",
         "snippets": "Aucune page ouverte : réponse basée sur les extraits de recherche.",
         "no_page": "Aucune page n'a pu être lue.",
+        "unread": "Refusées ou illisibles :",
     },
 }
 
@@ -85,9 +87,30 @@ def _source_line(url: str, titles: dict[str, str]) -> str:
     return f"- {title}: {url}" if title else f"- {url}"
 
 
-def build(opened: list[str], searched: bool, titles: dict[str, str] | None = None) -> str:
-    """opened: the pages web_extract returned in this turn, from the tool results; searched: a
-    web_search ran. Nothing is guessed from the answer. The wording follows Hermes's language."""
-    if not opened:
+MAX_UNREAD = 20  # refused or unreadable pages listed under one answer
+
+
+def _unread_line(url: str, why: str) -> str:
+    """"- https://... (HTTP 403 from origin)": the reason comes from the tool result, cleaned like a title."""
+    why = "".join(ch if ch.isprintable() else " " for ch in why[:300]).translate(_MARKDOWN_CHARS)
+    why = " ".join(why.split())
+    if len(why) > 80:
+        why = why[:77].rstrip() + "..."
+    return f"- {quote(url, safe=_URL_SAFE)} ({why})" if why else f"- {quote(url, safe=_URL_SAFE)}"
+
+
+def build(opened: list[str], searched: bool, titles: dict[str, str] | None = None,
+          unread: list[tuple[str, str]] | None = None) -> str:
+    """opened: the pages web_extract returned in this turn; unread: (url, why) for the pages it could
+    not read; searched: a web_search ran. All from the tool results: nothing is guessed from the
+    answer. The wording follows Hermes's language."""
+    unread = unread or []
+    if opened:
+        lines = [text("sources")] + [_source_line(url, titles or {}) for url in opened]
+    elif unread:
+        lines = [text("no_page")]
+    else:
         return text("snippets") if searched else text("no_page")
-    return "\n".join([text("sources")] + [_source_line(url, titles or {}) for url in opened])
+    if unread:
+        lines += [text("unread")] + [_unread_line(url, why) for url, why in unread[:MAX_UNREAD]]
+    return "\n".join(lines)

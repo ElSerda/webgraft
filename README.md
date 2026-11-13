@@ -157,6 +157,7 @@ Every page `web_extract` returned with real content in this turn.
 
 - The list comes from the tool results of the turn, not from the answer: nothing is guessed from the answer's wording or numbers.
 - When no page was opened, the footer says that the answer relies on search snippets only; when every page failed, that no page could be read.
+- Pages that could not be read are named under "Refused or unreadable", with the reason from the tool result (HTTP status, bot wall, AI opt-out), at most 20 per answer: over a long search, the answer says which sites refused.
 - A turn without web tools gets no footer.
 
 ## Prompt injection
