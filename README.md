@@ -149,7 +149,19 @@ Requests for the Hermes maintainers, so plugins would not have to work around th
 - **Redirect checks behind a proxy.** The security guide promises that redirect chains are re-validated at each hop, but the public `create_ssrf_safe_async_client` leaves proxied hops to the proxy. A public option or helper for that check would replace webgraft's own response hook.
 - **Hermes's Chromium.** webgraft follows the documented order ([Which Chromium](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser)) but cannot call Hermes's own resolver, which is not in the public plugin API. So it guesses the folder layout inside `hermes pm env chromium`'s browsers folder, and it looks for a system `chromium` on `PATH` last on every platform, where Hermes does so only where its package manager ships no Chromium. A public accessor is requested in [#154413](https://github.com/NousResearch/hermes-agent/issues/154413).
 - **Approval after untrusted content.** `tool_guard` asks for approval after web content and MCP results, recognised by tool name from outside; Hermes itself could track every untrusted source (mail, attachments, tools added later). Requested in [#147969](https://github.com/NousResearch/hermes-agent/issues/147969); webgraft's guard would then step aside.
-- **The keyless rescue.** A local backend should not fall back to outside services by default, a web provider should be able to declare that it must never be rescued, and the rescue's own note (rescued_from / backend_error) should reach the model, as its docs say. Today webgraft keeps its pages from the rescue by returning them as a policy refusal, the one kind Hermes never rescues, and cannot hold the first search of an outage. With such a declaration and a search hook, webgraft would drop that workaround and its record of refused pages.
+- **The keyless rescue: a `pre_keyless_rescue` hook, proposed and proven.** A local backend should not fall back to outside services by default, and the rescue's own note (rescued_from / backend_error) should reach the model, as its docs say.
+  - Today webgraft keeps its pages from the rescue by returning them as a policy refusal, the one kind Hermes never rescues; it needs a second `web_extract` to ask you, and it cannot hold the first search of an outage, because the rescue runs inside the tool, where no plugin hook is called.
+  - Hermes already asks for approval inside a tool (`terminal` does, for a dangerous command). One hook, called right before anything leaves for the keyless ring, would fix all three, with `pre_tool_call`'s directive shape and the same approval prompt:
+
+    ```
+    pre_keyless_rescue(tool_name, backend, error, urls=[...] or query="...")
+      None                                    the rescue runs, as today
+      {"action": "block", "message"}          it does not: the call keeps its own failure
+      {"action": "approve", "message", ...}   Hermes's approval prompt decides (fail closed)
+    ```
+  - webgraft's callback for it is ready: `pre_keyless_rescue_webgraft` in `rescue.py`, following the `keyless_rescue` setting. It is not registered, since Hermes's validator rejects a hook it does not know.
+  - The proof, `tests/test_hermes_rescue_hook_proof.py`, runs Hermes's own rescue code (v0.23.1) with the proposed hook added in memory and the keyless ring replaced by a recorder, so nothing leaves the machine. For a search whose backend is down and a page refused for its certificate: today, the query and the URL go out, nobody asked; with the hook, nothing goes out when nobody can answer (Hermes's real gate fails closed), when you deny, or with `block`; it goes out once when you approve. The proposed Hermes code is in the file (`proposed_rescue_veto`). Run it with the Python of Hermes's own environment (see Development).
+  - With that hook, webgraft would drop its workaround and its record of refused pages.
 - **The extract cache.** The 20-minute extract cache is documented for users ([Result caching](https://hermes-agent.nousresearch.com/docs/user-guide/features/web-search#result-caching)) but not in the web provider plugin guide: a provider is not told that a cache hit can skip it, and the `cached` flag Hermes sets on a hit is dropped before the result reaches plugin hooks.
 
 ## Which pages are listed
@@ -414,6 +426,14 @@ Runs everything locally, no cloud CI:
 - then the Hermes on the machine runs `hermes plugins doctor . --ci` (loads the plugin the way Hermes does) and `hermes plugins validate . --install-deps` (the catalog CI check).
 
 `--python 3.12` tests other versions, `--skip-hermes` runs the tests only.
+
+The proof for the hook proposed to Hermes (see [For Hermes](#for-hermes)) runs with the Python of Hermes's own environment, which holds Hermes's dependencies (on Windows, the `venv` folder under `HERMES_HOME/installs/<id>/environments/`):
+
+```
+<Hermes's venv python> tests/test_hermes_rescue_hook_proof.py
+```
+
+It finds Hermes's source folder with `hermes --version`, or `HERMES_AGENT_DIR`. Nothing leaves the machine: the keyless ring is replaced by a recorder.
 
 Before a catalog PR (new entry or re-pin), on Windows in Git Bash:
 

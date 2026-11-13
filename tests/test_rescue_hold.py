@@ -329,3 +329,21 @@ def test_off_asks_nothing():
     ctx = setup({"keyless_rescue": "off"})
     record_search(ctx, rescued_search())
     assert pre(ctx, "web_search", {"query": "q"}) == []
+
+
+# ---------------------------------------------------------------- the hook proposed to Hermes
+
+
+def test_the_proposed_hook_callback_follows_the_setting():
+    setup()
+    page = rescue.pre_keyless_rescue_webgraft(tool_name="web_extract", backend="webgraft", error=CERT, urls=[URL])
+    assert page["action"] == "approve" and page["rule_key"] == "webgraft:keyless_rescue:web_extract"
+    assert URL in page["message"] and "this URL" in page["message"]
+    search = rescue.pre_keyless_rescue_webgraft(tool_name="web_search", backend="searxng", error="refused", query="a\nb")
+    assert "searxng" in search["message"] and '"a b"' in search["message"]
+    setup({"keyless_rescue": "block"})
+    assert rescue.pre_keyless_rescue_webgraft(tool_name="web_search", backend="searxng")["action"] == "block"
+    setup({"keyless_rescue": "off"})
+    assert rescue.pre_keyless_rescue_webgraft(tool_name="web_extract", urls=[URL]) is None
+    setup()
+    assert rescue.pre_keyless_rescue_webgraft(tool_name="terminal") is None

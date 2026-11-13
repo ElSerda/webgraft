@@ -188,6 +188,54 @@ def clean(text: Any, limit: int = 200) -> str:
     return out[:limit]
 
 
+# ---------------------------------------------------------------- the hook Hermes is asked to add
+#
+# What webgraft does above is a workaround: it has to fake a policy refusal, it needs a second
+# web_extract to ask, and it cannot hold the first search of an outage, since the rescue runs inside
+# the tool, where no plugin hook is called. Hermes already asks for approval inside a tool (terminal
+# does, for a dangerous command), so the simple fix is one hook, called right before anything leaves
+# for the keyless ring, with pre_tool_call's directive shape and the same human gate:
+#
+#   pre_keyless_rescue(tool_name, backend, error, urls=[...] | query="...", **kwargs)
+#     -> None                                        the rescue runs, as today
+#     -> {"action": "block", "message"}              it does not; the call keeps its own failure
+#     -> {"action": "approve", "message", "rule_key"} Hermes's approval prompt decides (fail closed)
+#
+# pre_keyless_rescue_webgraft is webgraft's callback for it, ready for the day Hermes calls it. Until
+# then, Hermes's validator rejects a hook it does not know, so it is not registered: the proof runs it
+# against Hermes's own rescue code (tests/test_hermes_rescue_hook_proof.py, Hermes's interpreter).
+
+PROPOSED_HOOK = "pre_keyless_rescue"
+HOOK_ASK_PAGES = ("webgraft could not read {pages} on this machine ({why}). Let Hermes's keyless rescue send "
+                  "{it} to an outside service ({vendors})? That service fetches {that} from its own network, "
+                  "without webgraft's certificate check.")
+HOOK_ASK_SEARCH = ("webgraft: your search backend ({backend}) did not answer ({why}). Let Hermes's keyless rescue "
+                   "send this search to an outside service ({vendors})? \"{query}\"")
+HOOK_BLOCK = ("webgraft kept this on this machine (keyless_rescue: block): Hermes's keyless rescue would have "
+              "sent it to an outside service.")
+
+
+def pre_keyless_rescue_webgraft(tool_name: str = "", backend: str = "", error: str = "", urls: Any = None,
+                                query: Any = None, **_: Any) -> dict | None:
+    """webgraft's answer when Hermes is about to rescue a failed web_extract or web_search, by the
+    keyless_rescue setting: off lets it run, block refuses it, ask sends it to the approval prompt."""
+    current = mode()
+    if current == "off" or tool_name not in ("web_extract", "web_search"):
+        return None
+    if current == "block":
+        return {"action": "block", "message": HOOK_BLOCK}
+    why = clean(error, 160) or "no answer"
+    if tool_name == "web_search":
+        message = HOOK_ASK_SEARCH.format(backend=clean(backend, 40) or "?", why=why, vendors=VENDORS,
+                                         query=clean(query, 200))
+    else:
+        pages = [clean(u, 300) for u in (urls if isinstance(urls, (list, tuple)) else [urls]) if u][:5]
+        one = len(pages) == 1
+        message = HOOK_ASK_PAGES.format(pages=", ".join(pages) or "these pages", why=why, vendors=VENDORS,
+                                        it="this URL" if one else "these URLs", that="the page" if one else "them")
+    return {"action": "approve", "message": message, "rule_key": f"{RULE_KEY}:{tool_name}"}
+
+
 def reset() -> None:
     global _search_down
     with _lock:
