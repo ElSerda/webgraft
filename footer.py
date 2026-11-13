@@ -14,6 +14,7 @@ _TEXT = {
         "attached": "Attached by you (@url), read before the answer:",
         "rescued": "Read by Hermes's keyless rescue (an outside service), not on this machine:",
         "kept": "Unreadable here, and kept on this machine (not sent to Hermes's keyless rescue):",
+        "kept_hint": "To send one out anyway, ask for it again: Hermes will ask for your approval first.",
         "search_rescued": "Searched by Hermes's keyless rescue (an outside service), not by your search backend:",
         "instead_of": "instead of",
     },
@@ -25,6 +26,7 @@ _TEXT = {
         "attached": "Jointes par toi (@url), lues avant la réponse :",
         "rescued": "Lues par le secours sans clé d'Hermes (un service extérieur), pas sur cette machine :",
         "kept": "Illisibles ici, et gardées sur cette machine (pas envoyées au secours sans clé d'Hermes) :",
+        "kept_hint": "Pour en envoyer une quand même, redemande-la : Hermes te demandera ton accord avant.",
         "search_rescued": "Recherches faites par le secours sans clé d'Hermes (un service extérieur), pas par ton moteur de recherche :",
         "instead_of": "à la place de",
     },
@@ -120,7 +122,7 @@ def build(opened: list[str], searched: bool, titles: dict[str, str] | None = Non
           unread: list[tuple[str, str]] | None = None, attached: list[str] | None = None,
           rescued: list[tuple[str, str]] | None = None,
           search_rescued: list[tuple[str, str]] | None = None,
-          kept: list[tuple[str, str]] | None = None) -> str:
+          kept: list[tuple[str, str]] | None = None, kept_hint: bool = False) -> str:
     """opened: the pages web_extract returned in this turn; unread: (url, why) for the pages it could
     not read; searched: a web_search ran; attached: the pages the user attached with @url:. All from
     the tool results and the user's message: nothing is guessed from the answer. The wording follows
@@ -145,6 +147,8 @@ def build(opened: list[str], searched: bool, titles: dict[str, str] | None = Non
         lines += [text("rescued")] + [_unread_line(url, f"here: {why}") for url, why in rescued[:MAX_UNREAD]]
     if kept:
         lines += [text("kept")] + [_unread_line(url, why) for url, why in kept[:MAX_UNREAD]]
+        if kept_hint:
+            lines += [text("kept_hint")]
     if attached:
         lines += [text("attached")] + [f"- {quote(url, safe=_URL_SAFE)}" for url in attached[:MAX_UNREAD]]
     if unread:

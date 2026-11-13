@@ -45,6 +45,7 @@ def english_and_rescue_on(monkeypatch):
 
 def setup(settings=None):
     gw._turns.clear()
+    gw._asked.clear()
     ctx = FakeCtx(settings)
     gw.register(ctx)
     return ctx
@@ -244,8 +245,37 @@ def test_the_footer_says_the_page_stayed_on_this_machine():
     record(tool_name="web_extract", args={"urls": [URL]}, result=held_result(), session_id="s1")
     out = end(response_text="Could not read it.", session_id="s1", model="m", platform="cli")
     assert out.endswith("Unreadable here, and kept on this machine (not sent to Hermes's keyless rescue):\n"
-                        f"- {URL} ({CERT[:77]}...)")
+                        f"- {URL} ({CERT[:77]}...)\n"
+                        "To send one out anyway, ask for it again: Hermes will ask for your approval first.")
     assert "Refused or unreadable" not in out
+
+
+def test_with_block_the_footer_does_not_offer_to_send_it():
+    ctx = setup({"keyless_rescue": "block"})
+    [start], [record], [end] = (ctx.hooks[k] for k in ("pre_llm_call", "post_tool_call", "transform_llm_output"))
+    start(session_id="s1", user_message="q")
+    record(tool_name="web_extract", args={"urls": [URL]}, result=held_result("block"), session_id="s1")
+    out = end(response_text="Could not read it.", session_id="s1", model="m", platform="cli")
+    assert "kept on this machine" in out and "ask for it again" not in out
+
+
+def test_when_the_user_wrote_the_url_the_model_is_told_plainly_to_ask_again():
+    ctx = setup()
+    [start], [annotate] = ctx.hooks["pre_llm_call"], ctx.hooks["transform_tool_result"]
+    start(session_id="s1", user_message=f"donne moi le model de cette page {URL}")
+    note = json.loads(annotate(tool_name="web_extract", result=held_result(), session_id="s1", tool_call_id="c"))["webgraft_note"]
+    assert note.startswith("The user asked for this page") and "once more, now, before any other tool" in note
+
+
+def test_a_url_only_in_the_attached_text_is_not_the_users_request():
+    ctx = setup()
+    [start], [annotate] = ctx.hooks["pre_llm_call"], ctx.hooks["transform_tool_result"]
+    start(session_id="s1", user_message=f"summarise this\n\n--- Attached Context ---\n{URL}")
+    start(session_id="s2", user_message=f"open ({URL}).")
+    first = json.loads(annotate(tool_name="web_extract", result=held_result(), session_id="s1", tool_call_id="c"))
+    second = json.loads(annotate(tool_name="web_extract", result=held_result(), session_id="s2", tool_call_id="c"))
+    assert first["webgraft_note"].startswith("webgraft could not read")
+    assert second["webgraft_note"].startswith("The user asked for this page")
 
 
 # ---------------------------------------------------------------- searches

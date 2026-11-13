@@ -32,6 +32,7 @@ MAX_SESSIONS = 20
 
 _lock = threading.Lock()
 _turns: "OrderedDict[str, dict[str, Any]]" = OrderedDict()  # interrupted turns never reach the footer
+_asked: "OrderedDict[str, set[str]]" = OrderedDict()  # session -> URLs in the user's message this turn
 _ctx = None
 
 
@@ -216,6 +217,16 @@ def _attached_urls(message: Any) -> list[str]:
     return list(dict.fromkeys(str(r.target) for r in refs if r.kind == "url" and r.target))
 
 
+def _asked_urls(message: Any) -> set[str]:
+    """The URLs written in the user's own words this turn (not in the text @url: attached), as keys
+    comparable with rescue._key. Only the URLs are kept, not the message."""
+    from . import rescue
+
+    text = _text_of(message).split(ATTACHED_CONTEXT, 1)[0]
+    words = (w.strip("()<>[]{}.,;:!?\"'`") for w in text.split())
+    return {rescue._key(w) for w in words if "://" in w and w.lower().startswith(("http://", "https://"))}
+
+
 def _new_turn() -> dict[str, Any]:
     return {"opened": [], "titles": {}, "searched": False, "unread": {}, "attached": [], "rescued": {},
             "search_rescued": [], "kept": {}}
@@ -261,6 +272,15 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
     # An interrupted turn never reaches the transform hook, so its record is dropped here.
     with _lock:
         _turns.pop(session_id, None)
+    asked = _asked_urls(user_message)
+    with _lock:
+        if asked:
+            _asked[session_id] = asked
+            _asked.move_to_end(session_id)
+            while len(_asked) > MAX_SESSIONS:
+                _asked.popitem(last=False)
+        else:
+            _asked.pop(session_id, None)
     # Pages attached with @url: are web content in the conversation from this turn on.
     if attached := _attached_urls(user_message):
         _mark_web(session_id)
@@ -663,6 +683,12 @@ KEPT_NOTE_ASK = ("webgraft could not read these pages on this machine, and kept 
                  "pages, call web_extract on it once more: Hermes then asks the user whether to send it out. "
                  "Otherwise open the next relevant search result with web_extract, one URL per call; search "
                  "snippets are not sources.")
+# A small model given the conditional note above went on searching and tried the browser instead
+# (seen live with a 3B model): when the user wrote the URL, the note says what to do, plainly.
+KEPT_NOTE_ASKED = ("The user asked for this page, and webgraft could not read it on this machine: {pages}. "
+                   "Call web_extract on this same URL once more, now, before any other tool: Hermes then asks "
+                   "the user whether to send it to an outside service (its keyless rescue). If the user "
+                   "refuses, answer that the page could not be read here.")
 KEPT_NOTE_BLOCK = ("webgraft could not read these pages on this machine, and its keyless_rescue setting keeps them "
                    "from Hermes's keyless rescue (an outside service): {pages}. Open the next relevant search "
                    "result with web_extract, one URL per call; if the user asked for one of these pages, say "
@@ -695,9 +721,16 @@ def _annotate(tool_name: str = "", result: Any = None, session_id: str = "", too
                          "This call read only the first URL. Not opened: " + ", ".join(held))
         kept = _kept(result)
         if kept:
+            from . import rescue
+            with _lock:
+                asked = _asked.get(session_id, set())
             pages = "; ".join(f"{url} ({why[:120]})" for url, why, _ in kept)
-            notes.append((KEPT_NOTE_BLOCK if all(how == "block" for _, _, how in kept) else KEPT_NOTE_ASK)
-                         .format(pages=pages))
+            if all(how == "block" for _, _, how in kept):
+                notes.append(KEPT_NOTE_BLOCK.format(pages=pages))
+            elif any(rescue._key(url) in asked for url, _, _ in kept):
+                notes.append(KEPT_NOTE_ASKED.format(pages=pages))
+            else:
+                notes.append(KEPT_NOTE_ASK.format(pages=pages))
         elif _nothing_read(result):
             notes.append(UNREAD_NOTE)
         if rescued := _rescued(result):
@@ -759,7 +792,8 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
     unread = _unread(result) if tool_name == "web_extract" else []
     rescued = dict(_rescued(result)) if tool_name == "web_extract" else {}
     search_rescue = _search_rescue(result) if tool_name == "web_search" else None
-    kept = {url: why for url, why, _ in _kept(result)} if tool_name == "web_extract" else {}
+    kept_pages = _kept(result) if tool_name == "web_extract" else []
+    kept = {url: why for url, why, _ in kept_pages}
     unread = [(url, why) for url, why in unread if url not in kept]
     if tool_name == "web_search":
         from . import rescue
@@ -785,6 +819,8 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
             turn["rescued"].setdefault(url, why)
         for url, why in kept.items():
             turn["kept"].setdefault(url, why)
+        if any(how == "ask" for _, _, how in kept_pages):
+            turn["kept_ask"] = True
 
 
 def _footer_on() -> bool:
@@ -803,7 +839,8 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
     kept = [(u, w) for u, w in turn["kept"].items() if u not in turn["opened"] and u not in turn["rescued"]]
     unread = [(u, w) for u, w in unread if u not in turn["kept"]]
     text = footer.build(turn["opened"], turn["searched"], turn["titles"], unread, turn["attached"],
-                        list(turn["rescued"].items()), turn["search_rescued"], kept)
+                        list(turn["rescued"].items()), turn["search_rescued"], kept,
+                        kept_hint=bool(kept) and turn.get("kept_ask", False))
     # Keep the answer byte for byte: Hermes then prints only the added footer after a streamed reply.
     return f"{response_text}\n\n{text}" if text else None
 

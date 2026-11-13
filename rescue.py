@@ -27,7 +27,7 @@ from urllib.parse import urldefrag, urlsplit
 
 setting: Callable[[str, Any], Any] = lambda key, default: default  # noqa: E731 - set by register()
 
-HOLD_SECONDS = 300  # a page kept from the rescue can be asked for again during this time
+HOLD_SECONDS = 1800  # a page kept from the rescue can be asked for again during this time (the footer says how)
 APPROVAL_SECONDS = 600  # an approval prompt the user is still answering
 SEARCH_HOLD_SECONDS = 600
 MAX_PAGES = 500
