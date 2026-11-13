@@ -87,7 +87,7 @@ webgraft fixes the first two, pushes against the third, and shows which pages th
    - A page that answers 200 is never called an error because of its text, since a table, a price or a blog post can hold "404" or "not found".
    - Bot walls can answer 200, so a 200 page is checked for one: the response headers (Cloudflare marks its challenges with `cf-mitigated: challenge`), then the text, where a challenge page's own phrases ("Just a moment...", "Checking your browser", "Automated bot check") count on a page of any length, and words an article also uses ("captcha", "access denied") only on a short page that does not declare itself an article in its HTML head.
    - Only a real HTTP error is reported in Hermes's `HTTP <code> from origin` form, as Hermes's own backends write it. Walls, AI opt-outs, unreadable documents and pages without text are reported with their reason alone.
-   - What Hermes does next with a failed page is Hermes's decision: with `web.keyless_rescue: true` (Hermes's default), a call where every page failed is retried through Hermes's keyless free tier, outside services that fetch the page again from their own servers. To keep pages that refused, or asked not to be used by AI, from being fetched that way, set `web.keyless_rescue: false` in `config.yaml`.
+   - What Hermes does next with a failed page is Hermes's decision, and by default it leaves the machine: see "Hermes's keyless rescue sends failed pages to the cloud" under Limits.
    - A wall that another backend returns as content is never listed as a source.
 
 6. **The page's links whose text is in the content are listed last**, under "Links on this page" (40 at most): the products of a listing, the articles of an index, the sections of a documentation.
@@ -149,6 +149,7 @@ Requests for the Hermes maintainers, so plugins would not have to work around th
 - **Redirect checks behind a proxy.** The security guide promises that redirect chains are re-validated at each hop, but the public `create_ssrf_safe_async_client` leaves proxied hops to the proxy. A public option or helper for that check would replace webgraft's own response hook.
 - **Hermes's Chromium.** webgraft follows the documented order ([Which Chromium](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser)) but cannot call Hermes's own resolver, which is not in the public plugin API. So it guesses the folder layout inside `hermes pm env chromium`'s browsers folder, and it looks for a system `chromium` on `PATH` last on every platform, where Hermes does so only where its package manager ships no Chromium. A public accessor is requested in [#154413](https://github.com/NousResearch/hermes-agent/issues/154413).
 - **Approval after untrusted content.** `tool_guard` asks for approval after web content and MCP results, recognised by tool name from outside; Hermes itself could track every untrusted source (mail, attachments, tools added later). Requested in [#147969](https://github.com/NousResearch/hermes-agent/issues/147969); webgraft's guard would then step aside.
+- **The keyless rescue.** A local backend should not fall back to outside services by default, a web provider should be able to declare that it must never be rescued, and the rescue's own note (rescued_from / backend_error) should reach the model, as its docs say. webgraft would then drop its record of refused pages.
 - **The extract cache.** The 20-minute extract cache is documented for users ([Result caching](https://hermes-agent.nousresearch.com/docs/user-guide/features/web-search#result-caching)) but not in the web provider plugin guide: a provider is not told that a cache hit can skip it, and the `cached` flag Hermes sets on a hit is dropped before the result reaches plugin hooks.
 
 ## Which pages are listed
@@ -356,6 +357,13 @@ Hermes gives a plugin no documented way to know which other plugins register tha
 
 ## Limits
 
+- **Hermes's keyless rescue sends failed pages to the cloud, by default.** webgraft reads pages on this machine, but Hermes decides what happens when it cannot.
+  - With `web.keyless_rescue` at its default (true), a call where every page failed without an HTTP answer from the site (site down, DNS failure, timeout, a certificate webgraft refused) is retried through Hermes's keyless free tier: Exa, Parallel, Firecrawl or Keenable fetch the page again from their own servers.
+  - The URL then leaves this machine, and the outside service does not refuse a certificate webgraft refused. Hermes's setup does not mention it, and its docs describe the rescue as one "for keyed backends", which webgraft is not.
+  - webgraft cannot stop it without misreporting the failure. It says so instead: the model is told where such a page came from, and the footer lists it apart (see "Which pages are listed").
+  - To keep every read on this machine, set `web.keyless_rescue: false` under `web:` in Hermes's `config.yaml`, then restart the gateway. A page webgraft cannot read then stays unread, with its reason. This also stops the rescue for a failed web search.
+  - This is Hermes's default, not a webgraft setting: a local backend should not fall back to the cloud silently, and webgraft asks Hermes to change it ([requests for Hermes](#for-hermes)).
+
 - **From Hermes itself (the harness), documented rather than worked around:**
   - **One rewrite per tool result.** Like replies, a `web_extract` or `web_search` result keeps only the first plugin rewrite (`transform_tool_result`). webgraft rewrites a result only to add its note (URLs left out, a page that could not be read, an empty search); when another plugin rewrites the same result, one of the two rewrites is lost, depending on load order.
   - **Session ids.** `pre_llm_call` and `transform_llm_output` receive `session_id` only, not the `conversation_id` the plugin guide recommends for per-conversation state. When Hermes compresses a conversation into a new session (`compression.in_place: false`), webgraft follows it through `parent_session_id` (see Prompt injection).
@@ -369,8 +377,6 @@ Hermes gives a plugin no documented way to know which other plugins register tha
   - Bot-wall detection removes a page and says why: a wall is never passed off as content.
 
 - The footer says which pages the answer was built from. It does not check that each sentence of the answer matches them: that would take another model call per reply and still not be reliable.
-
-- An earlier page is matched on values with a unit, a price or a version; an answer that reuses only its prose is not linked to it.
 
 - Pages behind logins or strong bot protection cannot be read; they come back as errors.
 
