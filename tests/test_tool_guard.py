@@ -26,7 +26,6 @@ class FakeCtx:
 
 
 def setup(settings=None):
-    gw._sessions.clear()
     gw._turns.clear()
     gw._web_sessions.clear()
     gw._task_sessions.clear()
@@ -171,10 +170,15 @@ def test_a_page_read_by_a_script_marks_the_conversation_it_runs_in():
 
 def test_a_script_call_from_an_unknown_task_is_keyed_by_its_task():
     ctx = setup()
+    assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={}, session_id="", task_id="t8", tool_call_id="c1") is None
     ctx.hooks["post_tool_call"](tool_name="web_extract", args={}, result=PAGE, session_id="", task_id="t9")
     out = ctx.hooks["pre_tool_call"](tool_name="terminal", args={}, session_id="", task_id="t9", tool_call_id="c1")
     assert out["action"] == "approve"
-    assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={}, session_id="", task_id="t8", tool_call_id="c1") is None
+    # another task no conversation is known for: it cannot be told apart, so it is guarded too
+    out = ctx.hooks["pre_tool_call"](tool_name="terminal", args={}, session_id="", task_id="t8", tool_call_id="c1")
+    assert out["action"] == "approve"
+    # a known conversation that read nothing stays free
+    assert pre(ctx, "terminal", session="clean") is None
 
 
 def delegate(ctx, reads_web):

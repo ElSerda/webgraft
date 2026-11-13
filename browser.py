@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 from pathlib import Path
 
@@ -45,8 +44,12 @@ def _data_file() -> Path | None:
 
 
 def _revision(path: Path) -> int:
-    m = re.search(r"chromium-(\d+)", str(path))
-    return int(m.group(1)) if m else 0
+    """The build number of a Playwright-style "chromium-<n>" folder in the path, 0 if none."""
+    for part in path.parts:
+        name, _, number = part.partition("-")
+        if name == "chromium" and number.isdigit():
+            return int(number)
+    return 0
 
 
 def in_browsers_path(root: Path) -> Path | None:

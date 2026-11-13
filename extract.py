@@ -3,10 +3,12 @@
 Order for one URL:
   1. download it (HTTP errors such as 404 stop here, unless a browser can still open it);
   2. documents -> anydoc, Hermes's own converter (Markdown, tables kept); HTML -> trafilatura;
-  3. Crawl4AI, when its isolated environment is installed, renders the same page in a
-     browser. trafilatura drops what it takes for page furniture, spec tables included, so
-     the lines of Crawl4AI's output that hold values missing from trafilatura's text are
-     appended. When trafilatura gets nothing (script-built pages), Crawl4AI's text is used;
+  3. trafilatura drops what it takes for page furniture, spec tables and details panels included:
+     the values the page's markup labels itself (table rows, dt/dd, label/value blocks,
+     schema.org data) and trafilatura's text lacks are appended (structured.py). Crawl4AI, when
+     its isolated environment is installed, renders the same page in a browser: its rendered
+     HTML adds what scripts filled in, and when trafilatura gets nothing (script-built pages),
+     Crawl4AI's text is used;
   4. error and block pages that answer HTTP 200 ("Page not found", "Just a moment...") are
      reported as errors, never handed to the model as content.
 """
@@ -19,7 +21,6 @@ import contextvars
 import json
 import logging
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -28,7 +29,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import browser, site_rules, values
+from . import browser, site_rules, structured
+from . import crawl4ai_runner as runner_rules  # its pin checks (no third-party import at load)
 
 
 def setting(key: str, default):
@@ -66,25 +68,42 @@ OCR_TIMEOUT = 100
 # Bot walls and challenge pages. Phrases only a challenge page uses count anywhere near the top,
 # whatever the page length; words an article about the topic also uses ("captcha", "access
 # denied") count only on a short page (title included): a long page about the topic is content.
-_WALL_RE = re.compile(
-    r"\b(?:just a moment\.\.\.|attention required!?\s*\|\s*cloudflare|checking (?:if the site connection is secure|your browser)|"
-    r"verify(?:ing)? you are (?:a )?human|are you a (?:robot|human)\?|bot check in progress|"
-    r"automated (?:bot check|access to this page)|drag the handle|ddos protection by|"
-    r"please enable (?:javascript|cookies) (?:and|to continue)|enable javascript and cookies to continue)",
-    re.IGNORECASE,
+_WALL_PHRASES = (
+    "just a moment...", "attention required! | cloudflare", "attention required | cloudflare",
+    "checking if the site connection is secure", "checking your browser", "verify you are human",
+    "verify you are a human", "verifying you are human", "verifying you are a human", "are you a robot?",
+    "are you a human?", "bot check in progress", "automated bot check", "automated access to this page",
+    "drag the handle", "ddos protection by", "please enable javascript and", "please enable javascript to continue",
+    "please enable cookies and", "please enable cookies to continue", "enable javascript and cookies to continue",
 )
-_WALL_WORDS_RE = re.compile(
-    r"\b(?:just a moment|attention required|captcha|bot check|automated (?:bot|access|traffic)|"
-    r"ddos protection|security check|unusual traffic|access denied|accès refusé|request blocked|"
-    r"please enable (?:javascript|cookies))\b",
-    re.IGNORECASE,
+_WALL_WORDS = (
+    "just a moment", "attention required", "captcha", "bot check", "automated bot", "automated access",
+    "automated traffic", "ddos protection", "security check", "unusual traffic", "access denied", "accès refusé",
+    "request blocked", "please enable javascript", "please enable cookies",
 )
-# What the HTML head says about a page: an article (og:type article, a publication date, an
-# <article> element) is content, never a bot wall, whatever its title or text.
-_ARTICLE_RE = re.compile(
-    r"<meta[^>]{1,500}?(?:property|name)=[\"'](?:og:type[\"'][^>]{1,500}?content=[\"']article|article:published_time)|<article[\s>]",
-    re.IGNORECASE,
-)
+
+
+def _first_phrase(phrases: tuple[str, ...], text: str) -> str:
+    """The first of `phrases` the text holds, spaces and case aside, or an empty string."""
+    flat = " ".join(text.split()).casefold()
+    return next((p for p in phrases if p in flat), "")
+
+
+def _declares_article(html: str) -> bool:
+    """The HTML says the page is an article (og:type article, article:published_time, an <article>
+    element): content, never a bot wall, whatever its title or text. Parsed by lxml."""
+    for meta in site_rules._metas(html):
+        key = (meta.get("property") or meta.get("name") or "").lower()
+        if (key == "og:type" and meta.get("content", "").strip().lower() == "article") or key == "article:published_time":
+            return True
+    from lxml import html as lhtml
+
+    try:
+        return lhtml.fromstring(html[:200_000]).find(".//article") is not None
+    except Exception:  # noqa: BLE001 - unparsable markup
+        return False
+
+
 @dataclass
 class Page:
     url: str  # where the content came from (after redirects); the requested URL on an error
@@ -201,6 +220,47 @@ async def url_is_safe(url: str) -> bool:
         return False
 
 
+async def pinned_host(url: str) -> tuple[str, str] | None:
+    """(host, address) to pin the page's host to, in Chromium (--host-resolver-rules, built by the
+    runner from these two values).
+
+    The SSRF-safe download checked the host's address, but Chromium resolves the name again on its
+    own a few seconds later: a name that answers a public address first and 127.0.0.1 next (DNS
+    rebinding) would let the browser read a local service under a public name, and vet_view would
+    check the name again, not what Chromium connected to. So the name is resolved here, every
+    answer is checked with Hermes's SSRF check, and Chromium is told to use that address for that
+    name. Returns ("", "") when no pin is needed (an IP literal, already checked as a URL), None when
+    the host is not safe (no browser then). The page's other hosts (scripts, assets)
+    are not pinned; that limit is documented."""
+    from urllib.parse import urlsplit
+    import ipaddress
+    import socket
+
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    try:
+        ipaddress.ip_address(host)
+        return ("", "") if await url_is_safe(url) else None
+    except ValueError:
+        pass
+    if not runner_rules.valid_hostname(host):
+        return None
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return None
+    addresses = list(dict.fromkeys(info[4][0] for info in infos))
+    if not addresses:
+        return None
+    for address in addresses:  # every answer must be public, as in Hermes's own check
+        literal = f"[{address}]" if ":" in address else address
+        if not await url_is_safe(f"{parts.scheme}://{literal}:{port}/"):
+            return None
+    # IPv4 first when there is one: a machine with no IPv6 route could not reach an IPv6 pin.
+    return host, next((a for a in addresses if ":" not in a), addresses[0])
+
+
 def ssrf_blocked(exc: BaseException) -> bool:
     """True when a download was refused by the SSRF guard because a hop reached a private
     address, whether the guard's exception arrives as is or wrapped by httpx. The guard also
@@ -233,61 +293,39 @@ def looks_blocked(title: str, text: str, headers: dict | None = None, html: str 
     if headers.get("cf-mitigated") == "challenge":
         return "bot wall (Cloudflare challenge, cf-mitigated header)"
     short = len(text) < SHORT_PAGE_CHARS
-    m = _WALL_RE.search(f"{title}\n{text[:600]}")
-    article = bool(html) and bool(_ARTICLE_RE.search(html[:200_000]))
-    if not m and short and not article:
-        m = _WALL_WORDS_RE.search(f"{title}\n{text[:600]}")
-    if not m:
+    top = f"{title}\n{text[:600]}"
+    found = _first_phrase(_WALL_PHRASES, top)
+    if not found and short and not (html and _declares_article(html)):
+        found = _first_phrase(_WALL_WORDS, top)
+    if not found:
         return ""
-    return f"bot wall ({m.group(0)!r} in {'title' if m.group(0).lower() in title.lower() else 'text'})"
+    return f"bot wall ({found!r} in {'title' if found in ' '.join(title.split()).casefold() else 'text'})"
 
 
-def strip_links(markdown: str) -> str:
-    # Bounded repeats throughout: on page text, an unbounded [^\]]* or [^>]+ re-reads the rest of the
-    # page at every "[" or "<" that is never closed, and a crafted page then takes minutes.
-    text = re.sub(r"!\[[^\]]{0,500}\]\([^)]{0,2000}\)", "", markdown)  # images
-    text = re.sub(r"\[([^\]]{0,500})\]\([^)]{0,2000}\)", r"\1", text)  # links -> their text
-    text = re.sub(r"<https?://[^>\s]{1,2000}>", "", text)
-    text = "\n".join(line.rstrip(" \t") for line in text.split("\n"))
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
-
-
-# Bounded repeats, as in strip_links(): an <a> or "[" that is never closed must not make every
-# later match attempt re-read the rest of the page.
-_HTML_LINK_RE = re.compile(r"<a\s[^>]{0,1000}?href\s*=\s*[\"']([^\"'#]{1,2000})[^>]{0,1000}>(.{0,1000}?)</a>",
-                           re.IGNORECASE | re.DOTALL)
-_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]{1,500})\]\(([^)\s]{1,2000})\)")
-LINKS_SCAN_CHARS = 400_000  # of the HTML and of the browser view, searched for links
-_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def page_links(html: str, browser_md: str, url: str, content: str) -> str:
+def page_links(html: str, view_html: str, url: str, content: str) -> str:
     """The page's links whose text appears in `content`, one "- text: url" line each.
 
-    trafilatura and strip_links() keep a link's text and drop its target, so a model reading a
-    listing (products, search results, an index) sees names it cannot open. The links of the
-    HTML, then of the browser view, are listed in page order when their text is in the content:
-    navigation and footers, which the extraction already dropped, stay out. MAX_LINKS lines,
-    MAX_LINKS_CHARS at most.
+    trafilatura keeps a link's text and drops its target, and Crawl4AI's markdown is made without
+    links, so a model reading a listing (products, search results, an index) sees names it cannot
+    open. The <a href> of the downloaded HTML, then of the browser's rendered HTML (lxml), are listed
+    in page order when their text is in the content: navigation and footers, which the extraction
+    already dropped, stay out. MAX_LINKS lines, MAX_LINKS_CHARS at most.
     """
-    from html import unescape
     from urllib.parse import urljoin, urldefrag
 
     if not content.strip():
         return ""
-    haystack = re.sub(r"\s+", " ", content).casefold()
+    haystack = " ".join(content.split()).casefold()
     page = urldefrag(url)[0].rstrip("/")
     seen_urls: set[str] = {page}
     seen_texts: set[str] = set()
     out: list[str] = []
     size = 0
-    found = [(h, t) for h, t in _HTML_LINK_RE.findall((html or "")[:LINKS_SCAN_CHARS])] + \
-            [(h, t) for t, h in _MD_LINK_RE.findall((browser_md or "")[:LINKS_SCAN_CHARS])]
-    for href, raw in found:
-        text = re.sub(r"\s+", " ", unescape(_TAG_RE.sub(" ", raw))).strip()
-        if len(text) < 3 or not re.search(r"[^\W\d_]", text):
+    for href, raw in _anchors(html) + _anchors(view_html):
+        text = " ".join(raw.split())
+        if len(text) < 3 or not any(ch.isalpha() for ch in text):
             continue
-        target = urldefrag(urljoin(url, unescape(href.strip())))[0].rstrip("/")
+        target = urldefrag(urljoin(url, href.strip()))[0].rstrip("/")
         if not target.startswith(("http://", "https://")) or target in seen_urls:
             continue
         key = text.casefold()
@@ -303,59 +341,47 @@ def page_links(html: str, browser_md: str, url: str, content: str) -> str:
     return "\n".join(out)
 
 
-def _value_keys(text: str) -> set[tuple[str, str]]:
-    """Values with a unit, and bare numbers of 100 or more that are not years (copyright lines)."""
-    keys = set()
-    for occ in values.index_page("", text):
-        numeric = [float(v) for v in occ.values if re.fullmatch(r"\d+(?:\.\d+)?", v)]  # versions excluded
-        if occ.unit or any(n >= 100 and not (1900 <= n < 2100 and n.is_integer()) for n in numeric):
-            keys.update((v, occ.unit) for v in occ.values)
-    return keys
+def _anchors(html: str) -> list[tuple[str, str]]:
+    """(href, text) of a page's links, in page order, parsed by lxml."""
+    if not html or "<" not in html:
+        return []
+    from lxml import html as lhtml
+
+    try:
+        root = lhtml.fromstring(html[:structured.MAX_HTML_CHARS])
+    except Exception:  # noqa: BLE001 - unparsable markup: no links
+        return []
+    return [(a.get("href") or "", a.text_content()) for a in root.iter("a") if a.get("href")]
 
 
-def _has_label(line: str) -> bool:
-    """True when a line names what its values are, unlike benchmark rows such as "117.5 1%"."""
-    words = re.findall(r"[^\W\d_]{3,}", line.lower())
-    return any(w not in values.UNIT_SPELLINGS for w in words)
+STRUCTURE_HEADING = "## Values stated in the page's markup"
 
 
-def complement(main_text: str, browser_md: str) -> str:
-    """Lines of the browser text that hold values the main text lacks, with their headings."""
-    known = _value_keys(main_text)
-    out: list[str] = []
-    heading = ""
-    size = 0
-    for line in strip_links(browser_md).splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            heading = stripped
-            continue
-        new = _value_keys(stripped) - known
-        if not new or not _has_label(stripped):
-            continue
-        if heading:
-            out.append(heading)
-            size += len(heading) + 1
-            heading = ""
-        out.append(stripped)
-        size += len(stripped) + 1
-        known |= new
-        if size > MAX_COMPLEMENT_CHARS:
-            break
-    return "\n".join(out)
+def merge(main_text: str, browser_md: str, html: str = "", view_html: str = "") -> tuple[str, str]:
+    """(content, engine) from trafilatura's text, Crawl4AI's markdown and the pages' markup.
 
-
-def merge(main_text: str, browser_md: str) -> tuple[str, str]:
-    """(content, engine) from trafilatura's text and Crawl4AI's markdown."""
-    browser_text = strip_links(browser_md) if browser_md else ""
+    A page trafilatura cannot read (built by scripts) is read from the browser's text. Otherwise the
+    main text is kept, and the values the page's markup states but trafilatura left out (spec tables,
+    a details panel, a schema.org price) are appended: from the HTML downloaded, then from the
+    browser's rendered HTML for what its scripts added (structured.py)."""
+    browser_text = (browser_md or "").strip()
     if len(main_text.strip()) < 300 and browser_text:
         return browser_text[:READ_CHARS], "crawl4ai"
-    extra = complement(main_text, browser_md) if browser_md else ""
-    if extra:
-        return f"{main_text}\n\n## More values from this page (browser view)\n{extra}"[:READ_CHARS], "trafilatura+crawl4ai"
-    return main_text[:READ_CHARS], "trafilatura"
+    lines = structured.values(html, main_text)
+    seen = set(lines)
+    from_view = [line for line in structured.values(view_html, main_text) if line not in seen] if view_html else []
+    extra: list[str] = []
+    size, used_view = 0, False
+    for line in lines + from_view:
+        if size + len(line) + 3 > MAX_COMPLEMENT_CHARS:
+            break
+        extra.append(f"- {line}")
+        size += len(line) + 3
+        used_view = used_view or line in from_view
+    engine = "trafilatura+crawl4ai" if used_view else "trafilatura"
+    if not extra:
+        return main_text[:READ_CHARS], engine
+    return f"{main_text}\n\n{STRUCTURE_HEADING}\n{chr(10).join(extra)}"[:READ_CHARS], engine
 
 
 DOC_TIMEOUT = 60
@@ -524,9 +550,21 @@ def html_text(html: str, url: str) -> tuple[str, str]:
     meta = trafilatura.extract_metadata(html, default_url=url)
     title = (meta.title if meta and meta.title else "") or ""
     if not title:
-        m = re.search(r"<title[^>]{0,500}>(.{0,2000}?)</title>", html[:200_000], re.IGNORECASE | re.DOTALL)
-        title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
+        title = _html_title(html)
     return title, text
+
+
+def _html_title(html: str) -> str:
+    """The page's <title>, parsed by lxml, when trafilatura's metadata has none."""
+    if "<" not in html:
+        return ""
+    from lxml import html as lhtml
+
+    try:
+        found = lhtml.fromstring(html[:structured.MAX_HTML_CHARS]).findtext(".//title") or ""
+    except Exception:  # noqa: BLE001 - unparsable markup: no title
+        return ""
+    return " ".join(found.split())[:2000]
 
 
 # ---------------------------------------------------------------- Crawl4AI side environment
@@ -617,6 +655,9 @@ async def _browser_view(url: str) -> dict:
     chromium = browser.recorded()
     if chromium is None:
         return {"success": False, "error": "no Chromium recorded: run `hermes webgraft setup`"}
+    pin = await pinned_host(url)
+    if pin is None:
+        return {"success": False, "error": "the page's address is not public now: no browser"}
     global _pruned
     if not _pruned:
         _pruned = True
@@ -628,7 +669,8 @@ async def _browser_view(url: str) -> dict:
         proc = await asyncio.create_subprocess_exec(
             str(python), "-I", str(RUNNER), url, str(chromium), work,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=child_env(CRAWL4AI_NO_CLOUD_NOTICE="1", WEBGRAFT_USER_AGENT=user_agent), cwd=CHILD_CWD,
+            env=child_env(CRAWL4AI_NO_CLOUD_NOTICE="1", WEBGRAFT_USER_AGENT=user_agent,
+                          WEBGRAFT_PIN_HOST=pin[0], WEBGRAFT_PIN_ADDRESS=pin[1]), cwd=CHILD_CWD,
             **({} if os.name == "nt" else {"start_new_session": True}),  # its own group, Chromium included
         )
         try:
@@ -647,6 +689,7 @@ async def _browser_view(url: str) -> dict:
     view = json.loads(lines[-1])
     view["markdown"] = str(view.get("markdown") or "")[:READ_CHARS]
     view["head"] = str(view.get("head") or "")[:HEAD_CHARS]
+    view["html"] = str(view.get("html") or "")[:structured.MAX_HTML_CHARS]
     return await vet_view(view)
 
 
@@ -866,14 +909,15 @@ async def _read_page_itself(client, url: str) -> Page:
     browser_md = view.get("markdown", "") if view_ok else ""
     view_title = (view.get("title") or "") if view_ok else ""
     blocked = ""
-    if browser_md and (reason := looks_blocked(view_title, strip_links(browser_md), headers, html)):
+    if browser_md and (reason := looks_blocked(view_title, browser_md, headers, html)):
         browser_md, blocked = "", reason  # the browser met a wall: its view is dropped
     # Off the event loop: on a large page these take a moment, and Hermes's other work must go on.
-    content, engine = await asyncio.to_thread(merge, main, browser_md)
+    view_html = str(view.get("html") or "") if view_ok and not blocked else ""
+    content, engine = await asyncio.to_thread(merge, main, browser_md, html, view_html)
     title = title or view_title
     if not content.strip():
         return Page(url, title, error=_origin(status, blocked or "no readable text on the page"))
-    links = await asyncio.to_thread(page_links, html, browser_md, final, content)
+    links = await asyncio.to_thread(page_links, html, view_html, final, content)
     return Page(final, title, content, engine=engine, links=links, requested=url)
 
 

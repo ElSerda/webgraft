@@ -2,37 +2,26 @@
 
 from __future__ import annotations
 
-import re
 import unicodedata
+from urllib.parse import quote
 
 _TEXT = {
     "en": {
         "sources": "Sources (opened pages):",
-        "earlier": "Also used, opened earlier in this conversation:",
         "snippets": "No page opened: this answer relies on search snippets only.",
         "no_page": "No page could be read.",
-        "from_snippets": "From search snippets, not from an opened page: ",
     },
     "fr": {
         "sources": "Sources (pages ouvertes) :",
-        "earlier": "Aussi utilisées, ouvertes plus tôt dans la conversation :",
         "snippets": "Aucune page ouverte : réponse basée sur les extraits de recherche.",
         "no_page": "Aucune page n'a pu être lue.",
-        "from_snippets": "Venues des extraits de recherche, pas d'une page ouverte : ",
     },
 }
 
-_FRENCH_WORDS = re.compile(r"\b(?:le|la|les|des|est|une|avec|pour|dans|sur|pas|qui|que|du|et)\b", re.IGNORECASE)
-_ENGLISH_WORDS = re.compile(r"\b(?:the|is|are|with|for|in|on|not|which|that|of|and)\b", re.IGNORECASE)
-
-
-def _answer_language(text: str) -> str:
-    return "fr" if len(_FRENCH_WORDS.findall(text)) > len(_ENGLISH_WORDS.findall(text)) else "en"
-
-
 def _hermes_language() -> str | None:
-    """Hermes's UI language, resolved as Hermes does: HERMES_LANGUAGE > display.language > en.
-    None outside Hermes (tests, tools)."""
+    """Hermes's interface language, in Hermes's order: HERMES_LANGUAGE (per profile) > display.language
+    > en. Read through Hermes's public plugin API (agent.secret_scope, hermes_cli.config): its own
+    resolver, agent.i18n, is not part of that API. None outside Hermes."""
     try:
         from agent.secret_scope import get_secret
         from hermes_cli.config import load_config_readonly
@@ -48,50 +37,57 @@ def _hermes_language() -> str | None:
     return lang.lower().replace("_", "-").split("-")[0]
 
 
-def language_of(text: str, setting: str = "auto") -> str:
-    """auto: Hermes's display.language, like Hermes's own trailers (other languages get English).
-    answer: the language the answer is written in. en / fr: fixed."""
-    if setting in _TEXT:
-        return setting
-    if setting == "auto":
-        lang = _hermes_language()
-        if lang is not None:
-            return lang if lang in _TEXT else "en"
-    return _answer_language(text)
+def language() -> str:
+    """The footer's language: Hermes's interface language when webgraft has its wording (en, fr),
+    English otherwise and outside Hermes."""
+    lang = _hermes_language() or "en"
+    return lang if lang in _TEXT else "en"
+
+
+def text(key: str) -> str:
+    return _TEXT[language()][key]
+
+
+# The second list heading that versions before 0.2.0's footer simplification wrote: still recognised
+# in a conversation's history, so the model is told the lists were not its own.
+_OLDER_HEADINGS = ("Also used, opened earlier in this conversation:",
+                   "Aussi utilisées, ouvertes plus tôt dans la conversation :")
+
+
+def headings() -> set[str]:
+    """Every footer heading webgraft may have written, in any of its languages."""
+    return {t["sources"] for t in _TEXT.values()} | set(_OLDER_HEADINGS)
+
+
+_MARKDOWN_CHARS = str.maketrans({ch: " " for ch in "[]()<>!`\\"})
+# Characters a URL keeps as they are (RFC 3986 reserved and unreserved, and "%" for what is already
+# encoded): everything else, Markdown's brackets and parentheses and any space included, is encoded.
+_URL_SAFE = ":/?#@!$&'*+,;=%-._~"
 
 
 def _source_line(url: str, titles: dict[str, str]) -> str:
     """"- Page title: https://..." with the link bare, so terminals, Desktop and chat apps make it clickable."""
     # The title comes from the page: no Markdown that could render as a link or an image, and no
     # URL of its own, so the line can only point where webgraft says.
-    raw = (titles.get(url, "") or "")[:300]  # shown up to 80 characters; bounded before the regexes
+    raw = (titles.get(url, "") or "")[:300]  # shown up to 60 characters
     title = "".join(ch for ch in raw if unicodedata.category(ch) != "Cf")  # bidi, zero-width
-    title = re.sub(r"\S*://\S*|\S+@\S+|\bwww\.\S+", " ", title)  # URLs, e-mails, www. names: autolinked
-    title = re.sub(r"[\[\]()<>!`\\]", " ", title)
-    title = re.sub(r"\s+", " ", title).strip(" :-")
-    if len(title) > 80:
-        title = title[:77].rstrip() + "..."
+    title = title.translate(_MARKDOWN_CHARS)  # no link or image syntax
+    # Words that a terminal or chat app would turn into a link: URLs, e-mail addresses, www. names.
+    words = [w for w in title.split() if "://" not in w and "@" not in w and not w.lower().startswith("www.")]
+    title = " ".join(words).strip(" :-")
+    # The line is kept in the history as the assistant's words, outside Hermes's untrusted-data
+    # wrapper: the page's title is kept short.
+    if len(title) > 60:
+        title = title[:57].rstrip() + "..."
     # The URL comes from the page's redirects: characters that Markdown reads as link or image
     # syntax are percent-encoded, so the line stays one plain link to that address.
-    url = re.sub(r"[\[\]()<>`\s]", lambda m: f"%{ord(m.group()):02X}", url)
+    url = quote(url, safe=_URL_SAFE)
     return f"- {title}: {url}" if title else f"- {url}"
 
 
-def build(opened: list[str], searched: bool, lang: str, earlier: list[str] | None = None,
-          titles: dict[str, str] | None = None, from_snippets: list[str] | None = None) -> str:
-    """opened: pages read in this turn. earlier: pages from previous turns the answer relies on.
-    from_snippets: values of the answer found only in search snippets, as written in the answer."""
-    t = _TEXT[lang]
-    titles = titles or {}
-    lines: list[str] = []
-    if opened:
-        lines.append(t["sources"])
-        lines.extend(_source_line(url, titles) for url in opened)
-    if earlier:
-        lines.append(t["earlier"])
-        lines.extend(_source_line(url, titles) for url in earlier)
-    if not lines:
-        lines.append(t["snippets"] if searched else t["no_page"])
-    if from_snippets:
-        lines.append(t["from_snippets"] + ", ".join(from_snippets))
-    return "\n".join(lines)
+def build(opened: list[str], searched: bool, titles: dict[str, str] | None = None) -> str:
+    """opened: the pages web_extract returned in this turn, from the tool results; searched: a
+    web_search ran. Nothing is guessed from the answer. The wording follows Hermes's language."""
+    if not opened:
+        return text("snippets") if searched else text("no_page")
+    return "\n".join([text("sources")] + [_source_line(url, titles or {}) for url in opened])

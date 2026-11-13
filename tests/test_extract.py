@@ -27,30 +27,38 @@ BROWSER = """
 """
 
 
-def test_complement_adds_only_rows_with_new_values():
-    extra = ex.complement(MAIN, BROWSER)
-    assert "## Plans" in extra
-    assert "| Plus | $20 / month | 4 GB RAM, 25 GB disk |" in extra
-    assert "8 GB RAM" in extra
-    assert "Start now" not in extra and "Privacy" not in extra
-    assert "http" not in extra
+PLANS_HTML = """<html><body><article><p>Hermes Cloud, an always-on agent.</p></article>
+<aside><table><tr><th>Plan</th><th>Price</th><th>Cloud agent</th></tr>
+<tr><td>Plus</td><td>$20 / month</td><td>4 GB RAM, 25 GB disk</td></tr>
+<tr><td>Ultra</td><td>$200 / month</td><td>8 GB RAM, 100 GB disk</td></tr></table>
+<footer><a href="/privacy">Privacy</a> 2026</footer></aside></body></html>"""
 
 
-def test_complement_skips_values_already_in_main_text():
-    extra = ex.complement(MAIN + " Plus costs $20 / month with 4 GB RAM, 25 GB disk.", BROWSER)
-    assert "| Plus |" not in extra and "| Ultra |" in extra
+def test_table_rows_the_main_text_lacks_are_added():
+    content, engine = ex.merge(MAIN, "", PLANS_HTML)
+    assert engine == "trafilatura" and content.startswith(MAIN)
+    assert ex.STRUCTURE_HEADING in content
+    assert "- Plus: $20 / month | 4 GB RAM, 25 GB disk" in content and "- Ultra: $200 / month" in content
+    assert "Privacy" not in content
+
+
+def test_rows_already_in_the_main_text_are_not_repeated():
+    content, _ = ex.merge(MAIN + " Plus costs $20 / month | 4 GB RAM, 25 GB disk.", "", PLANS_HTML)
+    assert "- Plus:" not in content and "- Ultra:" in content
 
 
 def test_merge_uses_browser_text_when_main_text_is_empty():
-    content, engine = ex.merge("", BROWSER)
-    assert engine == "crawl4ai" and "8 GB RAM" in content and "](" not in content
+    # Crawl4AI hands over its markdown without link targets or images (ignore_links, ignore_images)
+    content, engine = ex.merge("", "# Hermes Cloud\n| Ultra | $200 / month | 8 GB RAM |")
+    assert engine == "crawl4ai" and "8 GB RAM" in content
 
 
-def test_merge_appends_complement():
-    content, engine = ex.merge(MAIN, BROWSER)
+def test_values_from_the_rendered_page_come_after_the_downloaded_ones():
+    rendered = PLANS_HTML.replace("</table>", "<tr><td>Max</td><td>$400 / month</td><td>16 GB RAM</td></tr></table>")
+    content, engine = ex.merge(MAIN, "", PLANS_HTML, rendered)
     assert engine == "trafilatura+crawl4ai"
-    assert content.startswith(MAIN)
-    assert "More values from this page" in content
+    assert content.index("- Ultra:") < content.index("- Max: $400 / month")
+    assert content.count("- Plus:") == 1
 
 
 def test_merge_without_browser():
@@ -89,11 +97,13 @@ def test_bot_wall_is_caught_even_on_a_long_page():
     assert ex.looks_blocked("Specs database", wall + "filler text " * 300)
 
 
-def test_unlabeled_number_rows_are_not_added():
-    md = "## Benchmarks\n117.5 1%\n240 fps (37%)\n| Memory Speed | 30000 effective |"
-    extra = ex.complement("Some text about the plans.", md)
-    assert "117.5" not in extra and "240 fps" not in extra
-    assert "Memory Speed" in extra
+def test_rows_without_a_label_cell_are_not_added():
+    html = ("<table><tr><td>117.5</td><td>1%</td></tr><tr><td>240 fps</td><td>37%</td></tr>"
+            "<tr><th>Memory Speed</th><td>30000 effective</td></tr></table>")
+    content, _ = ex.merge("Some text about the plans. " * 20, "", html)
+    assert "117.5" not in content and "240 fps" not in content
+    assert "- Memory Speed: 30000 effective" in content
+
 
 
 def test_origin_wording_only_when_the_site_answered_an_error():
@@ -158,8 +168,8 @@ def test_links_whose_text_is_in_the_content_are_listed_in_page_order():
 
 
 def test_links_come_from_the_browser_view_too_and_the_page_itself_is_skipped():
-    md = "[Cloud plans](https://portal.example/plans) [Ultra plan](https://portal.example/plans/ultra)"
-    assert ex.page_links("", md, "https://portal.example/plans/", "Cloud plans\nUltra plan $200") == \
+    view_html = '<a href="https://portal.example/plans">Cloud plans</a> <a href="/plans/ultra">Ultra plan</a>'
+    assert ex.page_links("", view_html, "https://portal.example/plans/", "Cloud plans\nUltra plan $200") == \
         "- Ultra plan: https://portal.example/plans/ultra"
     assert ex.page_links(LISTING_HTML, "", "https://portal.example/plans", "") == ""
 

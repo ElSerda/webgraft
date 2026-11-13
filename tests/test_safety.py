@@ -319,17 +319,12 @@ def _seconds(fn, *args):
     return time.perf_counter() - start
 
 
-def test_crafted_number_runs_are_indexed_in_linear_time():
-    values = importlib.import_module("webgraft.values")
-    for text in ("123 " * 20_000, "$1 " * 20_000, "12 GB " * 15_000):  # 60-90 KB, one line
-        assert _seconds(values.index_page, "", text) < 2, text[:6]
-
-
 def test_unclosed_tags_and_brackets_stay_fast():
-    for html, md in (('<a href="x">' * 8_000, ""), ("", "[abc" * 20_000), ("<meta " * 15_000, "")):
-        assert _seconds(ex.page_links, html, md, "https://x.example", "abc x") < 2
+    for html, view in (('<a href="x">' * 8_000, ""), ("", "<a href='y'>abc" * 20_000), ("<meta " * 15_000, "")):
+        assert _seconds(ex.page_links, html, view, "https://x.example", "abc x") < 2
         assert _seconds(ex.looks_blocked, "t", "short", {}, html) < 2
-    assert _seconds(ex.strip_links, "[a](b" * 20_000 + " " * 100_000) < 2
+    structured = importlib.import_module("webgraft.structured")
+    assert _seconds(structured.values, "<tr><th>a</th><td>1" * 20_000, "x") < 2
     sr = importlib.import_module("webgraft.site_rules")
     assert _seconds(sr.parse_llms_txt, "# x\n" + "[a" * 50_000, "https://x.example") < 2
     assert _seconds(sr.ai_optout, {}, "<meta " * 15_000) < 2
@@ -372,6 +367,10 @@ def test_a_browser_read_that_times_out_is_stopped_with_its_children(tmp_path, mo
     monkeypatch.setattr(ex, "crawl4ai_python", lambda: Path(sys.executable))
     monkeypatch.setattr(ex.browser, "recorded", lambda: Path("chromium"))
     monkeypatch.setattr(ex, "BROWSER_TIMEOUT", 3)
+
+    async def pin(url):
+        return "x.example", "93.184.215.14"
+    monkeypatch.setattr(ex, "pinned_host", pin)
     token = ex._user_agent.set("Mozilla/5.0 (compatible; HermesAgent/1.0)")
     try:
         view = asyncio.run(ex.browser_view("https://x.example"))

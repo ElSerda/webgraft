@@ -16,12 +16,6 @@ provides_hooks:
 provides_web_providers:
   - webgraft
 config_schema:
-  language:
-    type: str
-    choices: [auto, answer, en, fr]
-    default: auto
-    label: Footer language
-    description: "auto follows Hermes's display.language (English for languages other than en/fr); answer follows the language of the reply"
   show_sources:
     type: str
     choices: [always, never]

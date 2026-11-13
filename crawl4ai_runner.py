@@ -7,19 +7,18 @@ WORK_FOLDER (made and removed by the plugin) holds the browser profile and Crawl
 Crawl4AI drives the Chromium Hermes already installs (`hermes pm install chromium`), started here
 headless with a DevTools port and connected over CDP, so the plugin downloads no browser of its own.
 Kept out of Hermes's environment because Crawl4AI pulls about 35 packages.
-Output: {"success", "status", "title", "final_url", "markdown", "head", "error"}; markdown is Crawl4AI's pruned
-("fit") markdown, falling back to the full markdown when pruning leaves almost nothing.
+Output: {"success", "status", "title", "final_url", "markdown", "head", "html", "error"}; markdown is Crawl4AI's whole
+page as Markdown, without link targets or images. The plugin uses it only for pages trafilatura gets nothing
+from (built by scripts), where pruning would drop content (seen: a Vue page's heading, description and status
+counters); the values of other pages come from the rendered HTML.
 """
 
 import asyncio
 import json
 import os
-import queue
-import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import warnings
 
@@ -30,39 +29,64 @@ BUDGET = 50
 DEVTOOLS_WAIT = 20
 MAX_MARKDOWN = 400_000  # characters handed back; the plugin reads no more of a page
 MAX_HEAD = 100_000  # of the HTML, for the page's AI opt-out tags (robots / tdm-reservation)
+MAX_HTML = 3_000_000  # of the rendered HTML, for the values its markup states (structured.py)
+
+
+# The page's host pinned to the address the plugin checked (DNS rebinding), sent as two variables.
+def valid_hostname(host: str) -> bool:
+    """A DNS name: ASCII letters, digits, dots and hyphens, starting and ending with a letter or digit."""
+    return (0 < len(host) <= 253 and host.isascii() and host[0].isalnum() and host[-1].isalnum()
+            and all(ch.isalnum() or ch in ".-" for ch in host))
+
+
+def host_rule_flags(host: str, address: str) -> list[str]:
+    """Chromium's --host-resolver-rules for WEBGRAFT_PIN_HOST / WEBGRAFT_PIN_ADDRESS: nothing when the
+    plugin sent none (an IP literal), and an error for anything that is not one host and one address,
+    so the browser never runs unpinned by mistake."""
+    import ipaddress
+
+    if not host and not address:
+        return []
+    if not valid_hostname(host):
+        raise ValueError("malformed host pin")
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        raise ValueError("malformed host pin") from None
+    return [f"--host-resolver-rules=MAP {host} {f'[{ip}]' if ip.version == 6 else ip}"]
+
+
+def devtools_url(profile: str, proc, deadline: float) -> str | None:
+    """The browser's DevTools WebSocket URL, from the DevToolsActivePort file Chromium writes in its
+    profile when started with --remote-debugging-port=0 (port on the first line, path on the second),
+    the way browser automation tools find it. None when Chromium exits or the time runs out."""
+    port_file = os.path.join(profile, "DevToolsActivePort")
+    until = min(deadline, time.monotonic() + DEVTOOLS_WAIT)
+    while time.monotonic() < until and proc.poll() is None:
+        try:
+            with open(port_file, encoding="utf-8") as f:
+                port, path = (f.read().splitlines() + ["", ""])[:2]
+        except OSError:
+            port = path = ""
+        if port.strip().isdigit() and path.startswith("/devtools/browser/"):
+            return f"ws://127.0.0.1:{port.strip()}{path.strip()}"
+        time.sleep(0.1)
+    return None
 
 
 def start_chromium(executable: str, profile: str, deadline: float):
-    """Start Chromium headless on a free DevTools port. Returns (process, ws_url, profile_dir).
-
-    Chromium's stderr is read by a thread for the whole run: the DevTools line comes from it, and
-    a pipe nobody reads would fill and stall Chromium."""
+    """Start Chromium headless on a free DevTools port. Returns (process, ws_url, profile_dir)."""
     os.makedirs(profile, exist_ok=True)
+    flags = host_rule_flags(os.environ.get("WEBGRAFT_PIN_HOST", ""), os.environ.get("WEBGRAFT_PIN_ADDRESS", ""))
     proc = subprocess.Popen(
         [executable, "--headless=new", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
          f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", "--disable-gpu",
-         "--disable-extensions", "--mute-audio", "about:blank"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-        errors="replace",
+         "--disable-extensions", "--mute-audio", *flags, "about:blank"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    lines: "queue.Queue[str | None]" = queue.Queue()
-
-    def drain():
-        for line in proc.stderr:
-            lines.put(line)
-        lines.put(None)
-    threading.Thread(target=drain, daemon=True).start()
-    until = min(deadline, time.monotonic() + DEVTOOLS_WAIT)
-    while (left := until - time.monotonic()) > 0:
-        try:
-            line = lines.get(timeout=left)
-        except queue.Empty:
-            break
-        if line is None:
-            break
-        m = re.search(r"DevTools listening on (ws://\S+)", line)
-        if m:
-            return proc, m.group(1), profile
+    ws_url = devtools_url(profile, proc, deadline)
+    if ws_url:
+        return proc, ws_url, profile
     stop_chromium(proc, profile)
     raise RuntimeError("Chromium did not open its DevTools port")
 
@@ -98,11 +122,6 @@ async def crawl(url: str, ws_url: str) -> dict:
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
     from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
-    try:
-        from crawl4ai.content_filter_strategy import PruningContentFilterLXML as Pruning
-    except ImportError:  # older Crawl4AI
-        from crawl4ai.content_filter_strategy import PruningContentFilter as Pruning
-
     run = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
         page_timeout=35_000,
@@ -110,7 +129,8 @@ async def crawl(url: str, ws_url: str) -> dict:
         # scripts to load, then give them a second to fetch and render their data.
         wait_until="load",
         delay_before_return_html=1.0,
-        markdown_generator=DefaultMarkdownGenerator(content_filter=Pruning()),
+        # Text without link targets or images: the plugin lists a page's links from its HTML (lxml).
+        markdown_generator=DefaultMarkdownGenerator(options={"ignore_links": True, "ignore_images": True}),
         verbose=False,
     )
     # Hermes's own User-Agent, passed by the plugin: Crawl4AI would otherwise present itself as a
@@ -122,8 +142,7 @@ async def crawl(url: str, ws_url: str) -> dict:
     if not r.success:
         return {"success": False, "status": r.status_code, "error": str(r.error_message or "crawl failed")[:300]}
     md = r.markdown
-    fit = (md.fit_markdown or "") if md else ""
-    full = (md.raw_markdown or "") if md else ""
+    markdown = (md.raw_markdown or "") if md else ""
     title = ((r.metadata or {}).get("title") or "") if isinstance(r.metadata, dict) else ""
     # Where the browser ended, after redirects and script navigation: the plugin checks it before
     # using the text (Chromium does not go through Hermes's SSRF-safe client).
@@ -131,9 +150,8 @@ async def crawl(url: str, ws_url: str) -> dict:
     html = r.html or ""
     end = html.lower().find("</head>")
     head = html[:end if 0 <= end < MAX_HEAD else MAX_HEAD]
-    markdown = fit if len(fit) > 200 else full
     return {"success": True, "status": r.status_code, "title": title, "final_url": str(final),
-            "markdown": markdown[:MAX_MARKDOWN], "head": head}
+            "markdown": markdown[:MAX_MARKDOWN], "head": head, "html": html[:MAX_HTML]}
 
 
 def main(url: str, executable: str, work: str) -> dict:

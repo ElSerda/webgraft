@@ -17,23 +17,19 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
-from . import compat, footer, values
+from . import compat, footer
 
-# Page text is kept in memory per session, so an answer can rely on a page opened in an
-# earlier turn. Bounded: oldest pages, then oldest sessions, are dropped first. (Hermes's
-# on_session_end fires after every turn, so it cannot be used to forget a session.)
-MAX_PAGES_PER_SESSION = 30
+# The footer lists the pages web_extract returned in the current turn, from the tool results: no
+# page text is kept. Bounded records of turns in progress.
 MAX_SESSIONS = 20
 
 _lock = threading.Lock()
 _turns: "OrderedDict[str, dict[str, Any]]" = OrderedDict()  # interrupted turns never reach the footer
-_sessions: "OrderedDict[str, OrderedDict[str, tuple[str, str]]]" = OrderedDict()  # url -> (title, text)
 _ctx = None
 
 
@@ -73,13 +69,6 @@ def _pages(result: Any) -> list[dict]:
     ]
 
 
-def _snippets(result: Any) -> str:
-    """The titles and descriptions of a web_search result, as one text."""
-    data = _payload(result).get("data")
-    hits = (data or {}).get("web") if isinstance(data, dict) else None
-    return "\n".join(f"{h.get('title') or ''}\n{h.get('description') or ''}" for h in hits or [] if isinstance(h, dict))
-
-
 # Added to the user's message, a trusted position: inside a tool result Hermes marks text as data
 # the model must not follow. Small models otherwise answer from snippets that happen to hold numbers.
 # Said to be a note, not the request: a model given a bare URL and this text once took the text
@@ -103,7 +92,10 @@ URL_REMINDER = (
 FOOTER_SENTENCE = ("webgraft itself adds the list of the pages you opened under your answer; "
                    "do not write a sources list (a URL the user asks for is fine).")
 NO_FOOTER_SENTENCE = "End your answer with the URLs of the pages you used."
-_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+def _has_url(text: str) -> bool:
+    """Whether a text holds an http(s) URL (a command, a script, a user message)."""
+    low = text.casefold()
+    return "http://" in low or "https://" in low
 # Hermes keeps the footer in the conversation, so a model sees it under its own earlier answers and
 # may copy it into an answer that opened nothing (seen in testing with a large cloud model). Said only then.
 FOOTER_NOTE = (
@@ -114,7 +106,7 @@ FOOTER_NOTE = (
 
 def _footer_in_history(history: Any) -> str:
     """The footer heading found under an earlier answer, if any."""
-    headings = [text[key] for text in footer._TEXT.values() for key in ("sources", "earlier")]
+    headings = sorted(footer.headings())
     for message in history if isinstance(history, list) else []:
         if isinstance(message, dict) and message.get("role") == "assistant":
             content = str(message.get("content") or "")
@@ -167,15 +159,6 @@ def _history_tools(history: Any):
             yield "result", name, message.get("content")
 
 
-def _pages_from_history(history: Any) -> list[dict]:
-    """Pages that web_extract returned earlier in the conversation, from Hermes's message list."""
-    pages: list[dict] = []
-    for kind, name, content in _history_tools(history):
-        if kind == "result" and name == "web_extract":
-            pages.extend(_pages(content))
-    return pages
-
-
 def _text_of(message: Any) -> str:
     """The text of a user message. On a multimodal turn Hermes passes a list of parts (text, image):
     only the text parts count, so an image URL is not taken for a page to open."""
@@ -196,11 +179,6 @@ def _text_of(message: Any) -> str:
 
 def _start_turn(session_id: str = "", user_message: Any = "", conversation_history: Any = None,
                 **_: Any) -> Optional[str]:
-    # A resumed conversation runs in a new process: its earlier pages come back from the history.
-    if session_id not in _sessions and conversation_history:
-        for page in _pages_from_history(conversation_history):
-            with _lock:
-                _remember(session_id, page["url"], page["title"], page["content"])
     # Web content read earlier in the conversation is still in the context (also after a restart).
     # A continuation session (Hermes's lineage on compression) or a subagent inherits its parent's mark.
     parent = str(_.get("parent_session_id") or "")
@@ -212,22 +190,11 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
     parts = []
     if _setting("remind", True):
         footer = FOOTER_SENTENCE if _footer_on() else NO_FOOTER_SENTENCE
-        parts.append((URL_REMINDER if _URL.search(_text_of(user_message)) else REMINDER) + " " + footer)
+        parts.append((URL_REMINDER if _has_url(_text_of(user_message)) else REMINDER) + " " + footer)
     heading = _footer_in_history(conversation_history)
     if heading and compat.sources_mode(_setting("show_sources", "always")) != "never":
         parts.append(FOOTER_NOTE.format(heading=heading))
     return " ".join(parts) or None
-
-
-def _remember(session_id: str, url: str, title: str, content: str) -> None:
-    pages = _sessions.setdefault(session_id, OrderedDict())
-    _sessions.move_to_end(session_id)
-    pages[url] = (title, content)
-    pages.move_to_end(url)
-    while len(pages) > MAX_PAGES_PER_SESSION:
-        pages.popitem(last=False)
-    while len(_sessions) > MAX_SESSIONS:
-        _sessions.popitem(last=False)
 
 
 def _url_of(item: Any) -> Optional[str]:
@@ -260,9 +227,10 @@ _held: "OrderedDict[str, list[str]]" = OrderedDict()  # tool call -> URLs left o
 # refused ("block", which also holds under --yolo, where Hermes approves everything itself).
 # Tools that bring web content into the session: Hermes's untrusted set (web_search, web_extract and
 # the browser_ and mcp_ tools, whose results it wraps as untrusted data; an MCP server can relay a
-# page, a ticket or a mail), plus x_search.
+# page, a ticket or a mail), plus x_search and Hermes's hosted connectors (connectors__*: mail, Notion
+# and the like), which Hermes does not wrap.
 WEB_TOOLS = frozenset({"web_search", "web_extract", "x_search"})
-WEB_TOOL_PREFIXES = ("browser_", "mcp_")
+WEB_TOOL_PREFIXES = ("browser_", "mcp_", "connectors__")
 # vision_analyze and video_analyze take a URL (they download it: web content, which Hermes does not
 # wrap, and an image can hold text) or a local file path (a local read, scoped like read_file).
 MEDIA_TOOLS = {"vision_analyze": "image_url", "video_analyze": "video_url"}
@@ -334,12 +302,18 @@ def _brings_web(tool_name: str, args: Any = None) -> bool:
         text = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)
     except (TypeError, ValueError):
         text = str(args)
-    return bool(_URL.search(text))
+    return _has_url(text)
+
+
+# A call that cannot be tied to a conversation (no session id, no known task id) is keyed here, and
+# counts as guarded as soon as any conversation in this process has read web content: fail closed.
+UNATTRIBUTED = "unattributed:"
 
 
 def _session_of(session_id: Any, task_id: Any) -> str:
     """The conversation a tool call belongs to. A call with no session id (a tool that execute_code
-    runs for a script) is matched through its task id; failing that, the task id itself is the key."""
+    runs for a script) is matched through its task id; failing that, the task id itself is the key,
+    and a call with neither is UNATTRIBUTED."""
     session_id, task_id = str(session_id or ""), str(task_id or "")
     with _lock:
         if session_id:
@@ -351,7 +325,7 @@ def _session_of(session_id: Any, task_id: Any) -> str:
             return session_id
         if task_id:
             return _task_sessions.get(task_id) or f"task:{task_id}"
-    return ""
+    return UNATTRIBUTED
 
 
 # The ids of conversations that read web content (ids only, no content) are also kept on disk. Hermes's
@@ -400,7 +374,7 @@ def _mark_web(session_id: str) -> None:
         _web_sessions.move_to_end(session_id)
         while len(_web_sessions) > MAX_WEB_SESSIONS:
             _web_sessions.popitem(last=False)
-    if new and not session_id.startswith("task:"):
+    if new and not session_id.startswith(("task:", UNATTRIBUTED)):
         _save_mark(session_id)
 
 
@@ -412,7 +386,9 @@ def _is_marked(session_id: str) -> bool:
     with _lock:
         if session_id in _web_sessions:
             return True
-    if session_id.startswith("task:") or session_id not in _saved_marks(_marks_file()):
+        if session_id.startswith(("task:", UNATTRIBUTED)):
+            return bool(_web_sessions)  # not tied to a conversation: guarded once any read the web
+    if session_id not in _saved_marks(_marks_file()):
         return False
     with _lock:
         _web_sessions[session_id] = None
@@ -490,7 +466,7 @@ def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[d
     what = tool_name or "this tool"
     if tool_name in PATH_READ_TOOLS:
         # The path comes from the model, maybe from a page: no control characters in the prompt.
-        path = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", _read_path(tool_name, args) or "the current folder")[:300]
+        path = "".join(ch if ch.isprintable() else " " for ch in (_read_path(tool_name, args) or "the current folder"))[:300]
         what = f"{tool_name} on {path}"
     return {"action": "approve", "message": GUARD_ASK.format(tool=what),
             "rule_key": f"webgraft:tool_guard:{tool_name}"}
@@ -624,17 +600,16 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
         return
     pages = _pages(result) if tool_name == "web_extract" else []
     with _lock:
-        turn = _turns.setdefault(session_id, {"opened": [], "searched": False, "snippets": ""})
+        turn = _turns.setdefault(session_id, {"opened": [], "titles": {}, "searched": False})
         _turns.move_to_end(session_id)
         while len(_turns) > MAX_SESSIONS:
             _turns.popitem(last=False)
         if tool_name == "web_search":
             turn["searched"] = True
-            turn["snippets"] = (turn["snippets"] + "\n" + _snippets(result))[-20_000:]
         for page in pages:
-            _remember(session_id, page["url"], page["title"], page["content"])
             if page["url"] not in turn["opened"]:
                 turn["opened"].append(page["url"])
+                turn["titles"][page["url"]] = page["title"]
 
 
 def _footer_on() -> bool:
@@ -647,52 +622,34 @@ def _footer_on() -> bool:
 def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> Optional[str]:
     with _lock:
         turn = _turns.pop(session_id, None)
-        known = dict(_sessions.get(session_id, {}))
-    if not response_text or (turn is None and not known):
-        return None  # no web tool this turn and no page read before: nothing to report
-    if not _footer_on():
-        return None
-    titles = {u: t for u, (t, _) in known.items()}
-    opened = turn["opened"] if turn else []
-    # Pages from earlier turns are listed only when the answer uses one of their values.
-    earlier_pages = [{"url": u, "content": c} for u, (_, c) in known.items() if u not in opened]
-    earlier = values.pages_used(response_text, earlier_pages) if earlier_pages else []
-    if turn is None and not earlier:
-        return None  # a turn without web tools that does not draw on an earlier page
-    # Values the answer took from search snippets rather than from a page anyone read.
-    from_snippets = values.only_in(response_text, (turn or {}).get("snippets", ""),
-                                   [c for _, c in known.values()]) if turn and turn["searched"] else []
-    lang = footer.language_of(response_text, _setting("language", "auto"))
-    text = footer.build(opened, bool(turn and turn["searched"]), lang, earlier, titles, from_snippets)
+    if not response_text or turn is None or not _footer_on():
+        return None  # no web tool this turn: nothing to report
+    text = footer.build(turn["opened"], turn["searched"], turn["titles"])
     # Keep the answer byte for byte: Hermes then prints only the added footer after a streamed reply.
     return f"{response_text}\n\n{text}" if text else None
 
 
 def _frontmatter(path: Path) -> dict:
-    """Top-level scalar keys of a SKILL.md front matter (``key: value`` lines between the ``---`` markers)."""
+    """A SKILL.md front matter (the YAML between the first two ``---`` lines), parsed by ruamel.yaml,
+    the YAML library Hermes itself uses: its own front-matter parser (agent.skill_utils) is not part
+    of its public plugin API."""
     try:
-        text = path.read_text(encoding="utf-8")
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
     except OSError:
         return {}
-    m = re.match(r"---\r?\n(.*?)\r?\n---", text, re.S)
-    meta: dict = {}
-    for line in (m.group(1).splitlines() if m else []):
-        kv = re.match(r"([A-Za-z_][\w-]*):\s*(.*)$", line)
-        if kv and not line.startswith((" ", "\t")):
-            value = kv.group(2).strip()
-            if value.startswith("[") and value.endswith("]"):  # flow list: platforms: [linux, macos, windows]
-                items = [_unquote(item) for item in value[1:-1].split(",")]
-                meta[kv.group(1)] = [item for item in items if item]
-            elif _unquote(value) != "":
-                meta[kv.group(1)] = _unquote(value)
-    return meta
+    if not lines or lines[0].strip() != "---":
+        return {}
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
+    if end is None:
+        return {}
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
 
-
-def _unquote(value: str) -> str:
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        value = value[1:-1]
-    return value
+    try:
+        meta = YAML(typ="safe", pure=True).load("\n".join(lines[1:end]))
+    except YAMLError:
+        return {}
+    return dict(meta) if isinstance(meta, dict) else {}
 
 
 def register(ctx) -> None:

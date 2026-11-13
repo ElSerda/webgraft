@@ -26,7 +26,7 @@ Sources (opened pages):
 
 Links are written out in full rather than as Markdown links: the Hermes CLI prints replies as plain text, where a bare link stays clickable (Ctrl+click in Windows Terminal) and Desktop and chat apps link it too.
 
-The footer is in English or French. By default it follows Hermes's `display.language`, like Hermes's own notices; set `language: answer` to follow the language of the reply instead.
+The footer follows Hermes's interface language (`HERMES_LANGUAGE`, then `display.language`), like Hermes's own notices: English or French, English for other languages.
 
 ## Contents
 
@@ -74,9 +74,12 @@ webgraft fixes the first two, pushes against the third, and shows which pages th
    - A scanned PDF (page images, no text layer) is read by local OCR when it is installed: RapidOCR, no language model, about 1 second per page; the text comes with a note that it was read by OCR. Without OCR, the error names the scanned pages.
 
    HTML: main text with trafilatura.
+   - trafilatura keeps the body of a page and drops the rest as page furniture, including a spec table in a tab, a product's details panel or a purchase box (seen: an RTX 5080 spec sheet, a game's price and release date, `favor_recall` included).
+   - **What the page's own markup states** is added back under "Values stated in the page's markup", when the main text lacks it, read from standards only: table rows whose first cell is a label, `dt`/`dd` lists, and schema.org data (microdata or JSON-LD) of any type: a product's price and currency, an event's date, a recipe's time.
+   - Left out: schema.org types that describe the site around the page (breadcrumbs, the publisher, the site search), links, images and rating scales. No class name, no word list, no site convention: a label with more letters than digits, at most 8,000 characters.
 
 4. **With Crawl4AI installed**, a page the site served (status 200, no bot wall) is also opened in a headless browser (the Chromium Hermes installs), with the same `HermesAgent` User-Agent.
-   - Lines of the browser view that hold values missing from the main text, such as spec table rows, are appended under "More values from this page".
+   - The browser's rendered HTML is read the same way, for the values its scripts filled in.
    - Pages that trafilatura cannot read, because scripts build them (Vue, React...), use the browser view instead: the browser waits for the page to load, then one more second for its scripts to fetch their data.
    - The browser only completes what the site served. A page the site refused (403, 429...) or a bot wall is never re-read in the browser: that would be getting past the site's answer.
 
@@ -152,10 +155,9 @@ Requests for the Hermes maintainers, so plugins would not have to work around th
 
 Every page `web_extract` returned with real content in this turn.
 
-- A page opened in an earlier turn of the conversation is added under "Also used, opened earlier in this conversation" when the answer contains one of its values with a unit, a price or a version: an answer may rely on a page read a few turns before.
-- When no page was opened, the footer says that the answer relies on search snippets only.
-- When the turn searched and the answer holds a value (with a unit, a price or a version) that appears in the search snippets but on no page read in the conversation, a last line names it: "From search snippets, not from an opened page: 2617 MHz".
-  - That is a presence check on the number and its unit, not a judgement of the value.
+- The list comes from the tool results of the turn, not from the answer: nothing is guessed from the answer's wording or numbers.
+- When no page was opened, the footer says that the answer relies on search snippets only; when every page failed, that no page could be read.
+- A turn without web tools gets no footer.
 
 ## Prompt injection
 
@@ -179,7 +181,8 @@ Local test site with injected pages (a code word to start the reply with, a URL 
 
 ### What webgraft adds: `tool_guard` (on by default)
 
-- **When:** once the conversation has read web content (a result of `web_search`, `web_extract`, `x_search`, a `browser_*` tool or an MCP tool `mcp_*`, the results Hermes itself marks as untrusted), also after a restart or a resumed conversation.
+- **When:** once the conversation has read web content (a result of `web_search`, `web_extract`, `x_search`, a `browser_*` tool or an MCP tool `mcp_*`, the results Hermes itself marks as untrusted, or a hosted connector `connectors__*` such as mail or Notion, which Hermes does not mark), also after a restart or a resumed conversation.
+  - A tool call that carries neither a session id nor a known task id cannot be tied to a conversation: it is guarded as soon as any conversation in this Hermes process has read web content.
   - **The mark is kept on disk:** the ids of those conversations (ids only, never content) go to `HERMES_HOME/plugin-data/webgraft/web_sessions.json`, at most 1000. Hermes's history is not enough: when it compresses a conversation it replaces the old tool results with a summary, and that summary can still carry what a page said. Seen live: after `/compress` and a gateway restart, a resumed conversation ran `terminal` until this was added.
   - A continuation session (Hermes's lineage on compression) and a subagent inherit the mark of their parent (`parent_session_id`).
   - `vision_analyze` and `video_analyze` on an `http://` or `https://` URL count too: they download it, Hermes does not mark the result as untrusted, and an image can hold text.
@@ -265,6 +268,8 @@ If there is none, `setup` offers `hermes pm install chromium`.
 
 For each page, a fresh headless instance starts with a temporary profile and a DevTools port on 127.0.0.1, Crawl4AI connects to it, and it is stopped and its profile deleted when the page is read.
 
+- **The DevTools port:** while a page is read (60 seconds at most), any program running on this machine could connect to that port and drive the browser, including opening `file://` pages. That is how Crawl4AI drives it. On a machine shared with other users you do not trust, skip Crawl4AI in `setup`.
+
 Without Crawl4AI, pages are read with trafilatura only, and lists and tables it takes for page furniture (the plan list above) stay out.
 
 ### Local OCR
@@ -281,7 +286,6 @@ Under Settings → Plugins in Hermes Desktop, or `plugins.entries.webgraft.setti
 
 | Key | Default | Meaning |
 |---|---|---|
-| `language` | `auto` | Footer language: `auto` (Hermes's `display.language`; English for languages other than en/fr), `answer` (the reply's language), `en` or `fr` |
 | `show_sources` | `always` | `always`: list the opened pages under the answer. `never`: no list (with another plugin that rewrites replies, see below). Older values: `auto` means `always` |
 | `remind` | `true` | Add a short note to each user message (about 110 tokens), marked as a note and not the request: search snippets are not sources, open the pages, and open the pages a multi-URL call left out. When the message holds a URL, the note asks to open that page instead of searching |
 | `one_url_per_call` | `true` | A `web_extract` call that asks for several URLs reads only the first; the result lists the others |
@@ -315,7 +319,8 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
   - **with a proxy** (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`), Hermes's client checks only direct connections and leaves each hop to the proxy: webgraft then checks the target of every redirect itself before it is followed. Which addresses the proxy itself can reach is the proxy's business;
   - a result names the page actually read in `url` (the requested URL is in `metadata.sourceURL`), so Hermes re-checks a redirect target against its SSRF and website policies;
   - the browser starts only after that download, on the address it reached, and its view is dropped when the page it ended on (after its own redirects and script navigation) is not a public address, or is on another site than the page downloaded;
-  - **Limit:** only the page the browser ends on is checked. What that page itself requests (images, scripts, `fetch` calls) and the browser's own DNS lookups are not, so a hostile page can make the browser send requests to your network, as any browser that opened it could. If that matters on your network, skip Crawl4AI in `setup`: pages are then read by the SSRF-safe client alone.
+  - **the page's host is pinned:** webgraft resolves it, checks every answer with Hermes's SSRF check, and tells Chromium to use that address (`--host-resolver-rules`). Without it, a name that answers a public address to the download and 127.0.0.1 to the browser a moment later (DNS rebinding) let the browser read a local service under a public name: shown with a local test server, where the page came back with its content and passed the end-of-page check. A host that resolves to any private address gets no browser at all;
+  - **Limit:** what the page itself requests from other hosts (images, scripts, `fetch` calls) is not checked or pinned, so a hostile page can make the browser send requests to your network, as any browser that opened it could. If that matters on your network, skip Crawl4AI in `setup`: pages are then read by the SSRF-safe client alone.
 
 - **Processes:**
   - one Crawl4AI child process per page, at most three at once in the whole Hermes process, each stopped after 60 seconds; it starts Hermes's Chromium headless (DevTools port on 127.0.0.1, temporary profile) and stops it before exiting;
@@ -331,7 +336,7 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
   - the Chromium path, in `browser.json` next to it;
   - the ids of the conversations that read web content, in `web_sessions.json` next to it (no content; at most 1000; see [Prompt injection](#prompt-injection)).
 
-  Nothing else is stored: page text lives in memory only, for at most 30 pages per conversation and 20 conversations, and so does which sites publish an `llms.txt` (for an hour); all of it is gone when Hermes stops.
+  Nothing else is stored: no page text is kept (the footer lists the pages of the current turn from its tool results); which sites publish an `llms.txt` stays in memory for an hour; all of it is gone when Hermes stops.
 
 - **Reads:**
   - `web.extract_char_limit` (for `setup` and `status`) and `display.language` in `config.yaml`;
@@ -349,15 +354,15 @@ Hermes gives a plugin no documented way to know which other plugins register tha
 
 - **From Hermes itself (the harness), documented rather than worked around:**
   - **One rewrite per tool result.** Like replies, a `web_extract` or `web_search` result keeps only the first plugin rewrite (`transform_tool_result`). webgraft rewrites a result only to add its note (URLs left out, a page that could not be read, an empty search); when another plugin rewrites the same result, one of the two rewrites is lost, depending on load order.
-  - **Session ids.** `pre_llm_call` and `transform_llm_output` receive `session_id` only, not the `conversation_id` the plugin guide recommends for per-conversation state. When Hermes compresses a conversation into a new session (`compression.in_place: false`), webgraft starts over: pages read before do not appear under "opened earlier".
+  - **Session ids.** `pre_llm_call` and `transform_llm_output` receive `session_id` only, not the `conversation_id` the plugin guide recommends for per-conversation state. When Hermes compresses a conversation into a new session (`compression.in_place: false`), webgraft follows it through `parent_session_id` (see Prompt injection).
   - **Proxies.** Hermes's security guide says redirect chains are re-validated at each hop, but its public SSRF-safe client leaves proxied hops to the proxy. webgraft checks redirect targets itself (see "Private addresses"), and asks Hermes for a public way ([requests for Hermes](#for-hermes)).
 
 - **From Crawl4AI and Chromium:** only the page the browser ends on is checked (see "Private addresses"). Hermes takes the same stance for its own local browser: with a local terminal backend it "can open `localhost` and LAN addresses" and "reaches nothing the terminal can't" ([Browser](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser#local-chromium-default)). Skip Crawl4AI in `setup` if that matters on your network.
 
 - **What is mechanical and what is an estimate.**
-  - Mechanical: HTTP errors, document conversion and OCR, `llms.txt`, AI opt-outs, one URL per call, the links of a page, the empty-search note, and the list of opened pages (from tool results).
-  - Estimates: bot walls on pages that answer 200 (phrases and headers), the browser-view complement (which lines hold missing values), the "opened earlier" pages (shared values), and `language: answer`.
-  - Each estimate is additive, shown as such (a note, a heading), and can be turned off, except bot-wall detection, which removes a page and says why.
+  - Mechanical: HTTP errors, document conversion and OCR, `llms.txt`, AI opt-outs, one URL per call, the links of a page, the values the page's markup labels, the empty-search note, and the list of opened pages (from tool results).
+  - Estimates: bot walls on pages that answer 200 (phrases and headers).
+  - Bot-wall detection removes a page and says why: a wall is never passed off as content.
 
 - The footer says which pages the answer was built from. It does not check that each sentence of the answer matches them: that would take another model call per reply and still not be reliable.
 

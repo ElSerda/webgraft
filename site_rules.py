@@ -14,7 +14,6 @@ Opt-outs: a page that asks not to be used by AI is returned as an error, not as 
 from __future__ import annotations
 
 import codecs
-import re
 import threading
 import time
 from collections import OrderedDict
@@ -26,9 +25,7 @@ LLMS_TIMEOUT = 8
 MAX_SITES = 200
 
 BOM = chr(0xFEFF)  # byte order mark that some editors put at the start of a text file
-# Bounded repeats: an llms.txt (up to 2 MB) or a page head with an unclosed "[" or "<meta" must not
-# make every later match attempt re-read the rest of the file.
-_LINK = re.compile(r"\[[^\]]{0,500}\]\(\s{0,20}<?([^)\s>]{1,2000})>?(?:\s{1,20}\"[^\"]{0,500}\")?\s{0,20}\)")
+HEAD_CHARS = 200_000  # of a page, searched for its <meta> tags when it has no </head>
 _lock = threading.Lock()
 _sites: "OrderedDict[str, tuple[float, frozenset[str] | None]]" = OrderedDict()
 
@@ -36,30 +33,37 @@ _sites: "OrderedDict[str, tuple[float, frozenset[str] | None]]" = OrderedDict()
 # ---------------------------------------------------------------- opt-outs
 
 
-_META = re.compile(r"<meta\b[^>]{0,2000}>", re.IGNORECASE)
-_ATTR = re.compile(r"""(\w[\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
-
-
 def _metas(html: str) -> list[dict[str, str]]:
-    head = html[: html.lower().find("</head>")] if "</head>" in html.lower() else html[:200_000]
-    out = []
-    for tag in _META.findall(head):
-        attrs = {m.group(1).lower(): (m.group(2) or m.group(3) or m.group(4) or "") for m in _ATTR.finditer(tag)}
-        out.append(attrs)
-    return out
+    """The attributes of the page's <meta> tags, parsed by lxml (names lowercased)."""
+    end = html.lower().find("</head>")
+    head = html[:end + 7] if end >= 0 else html[:HEAD_CHARS]
+    if "<" not in head:
+        return []
+    from lxml import html as lhtml
+
+    try:
+        root = lhtml.fromstring(head)
+    except Exception:  # noqa: BLE001 - unparsable markup: no tags
+        return []
+    return [{str(k).lower(): str(v) for k, v in meta.attrib.items()} for meta in root.iter("meta")]
+
+
+def _has_noai(value: str) -> bool:
+    """`noai` as one of the directives of a robots value ("noai, noimageai", "index noai")."""
+    return "noai" in value.lower().replace(",", " ").split()
 
 
 def ai_optout(headers: dict | None, html: str = "") -> str:
     """Why the page asks not to be used by AI, or an empty string."""
     h = {str(k).lower(): str(v).lower() for k, v in (headers or {}).items()}
-    if re.search(r"\bnoai\b", h.get("x-robots-tag", "")):
+    if _has_noai(h.get("x-robots-tag", "")):
         return "X-Robots-Tag: noai"
     if h.get("tdm-reservation", "").strip() == "1":
         return "tdm-reservation: 1 (TDM Reservation Protocol)"
     for meta in _metas(html) if html else []:
         name = meta.get("name", "").lower()
         content = meta.get("content", "").lower()
-        if name in ("robots", "ai", "ai-robots") and re.search(r"\bnoai\b", content):
+        if name in ("robots", "ai", "ai-robots") and _has_noai(content):
             return f'<meta name="{name}" content="noai">'
         if name == "tdm-reservation" and content.strip() == "1":
             return '<meta name="tdm-reservation" content="1"> (TDM Reservation Protocol)'
@@ -79,7 +83,14 @@ def parse_llms_txt(text: str, base: str) -> frozenset[str] | None:
     body = text.lstrip(BOM + " \t\r\n")
     if not body.startswith("# ") or body[:200].lower().lstrip().startswith(("<!doctype", "<html")):
         return None
-    return frozenset(urljoin(base + "/", m.group(1)) for m in _LINK.finditer(body))
+    from markdown_it import MarkdownIt  # Hermes's own Markdown parser (via rich)
+
+    links = set()
+    for token in MarkdownIt("commonmark").parse(body):
+        for child in token.children or []:
+            if child.type == "link_open" and (href := child.attrGet("href")):
+                links.add(urljoin(base + "/", str(href)))
+    return frozenset(links)
 
 
 async def get_capped(client, url: str, limit: int, timeout: float | None = None):
@@ -158,7 +169,7 @@ def markdown_version(url: str, links: frozenset[str]) -> str:
     candidates = {bare + ".md", bare + "/index.md", bare + "/index.html.md"}
     if bare.endswith((".html", ".htm")):
         candidates.add(bare + ".md")
-        candidates.add(re.sub(r"\.html?$", ".md", bare))
+        candidates.add(bare.rsplit(".", 1)[0] + ".md")
     for link in links:
         if link.split("#")[0] in candidates:
             return link.split("#")[0]

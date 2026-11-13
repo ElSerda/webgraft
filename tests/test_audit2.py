@@ -17,7 +17,6 @@ gw = load()
 ex = importlib.import_module("webgraft.extract")
 sr = importlib.import_module("webgraft.site_rules")
 footer = importlib.import_module("webgraft.footer")
-values = importlib.import_module("webgraft.values")
 browser = importlib.import_module("webgraft.browser")
 cli = importlib.import_module("webgraft.cli")
 
@@ -39,13 +38,6 @@ def fake_url_safety(monkeypatch, safe=lambda url: True):
 
 
 # ---------------------------------------------------------------- crafted pages
-
-
-def test_unclosed_brackets_in_values_stay_fast():
-    start = time.perf_counter()
-    values.index_page("", "[" * 40_000)
-    values.pages_used("12 GB", [{"url": "https://x.example", "content": "[" * 40_000}])
-    assert time.perf_counter() - start < 2
 
 
 def test_only_text_codecs_are_used_to_decode_a_page():
@@ -156,9 +148,10 @@ def test_a_browser_view_from_another_site_is_not_merged(monkeypatch):
 
 def test_a_browser_view_of_the_same_site_is_merged(monkeypatch):
     view = {"success": True, "status": 200, "markdown": "## Specs\n| Memory size | 32 GB |",
+            "html": "<table><tr><th>Memory size</th><td>32 GB</td></tr></table>",
             "final_url": "https://www.site.example/specs"}
     page = _page_with_view(monkeypatch, view)
-    assert page.engine == "trafilatura+crawl4ai"
+    assert page.engine == "trafilatura+crawl4ai" and "- Memory size: 32 GB" in page.content
 
 
 def test_the_browser_copy_of_a_page_respects_its_ai_opt_out(monkeypatch):
