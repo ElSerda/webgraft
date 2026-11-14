@@ -229,7 +229,7 @@ def _asked_urls(message: Any) -> set[str]:
 
 def _new_turn() -> dict[str, Any]:
     return {"opened": [], "titles": {}, "searched": False, "unread": {}, "attached": [], "rescued": {},
-            "search_rescued": [], "kept": {}}
+            "search_rescued": [], "kept": {}, "sent": {}}
 
 
 def _kept(result: Any) -> list[tuple[str, str, str]]:
@@ -795,8 +795,13 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
     kept_pages = _kept(result) if tool_name == "web_extract" else []
     kept = {url: why for url, why, _ in kept_pages}
     unread = [(url, why) for url, why in unread if url not in kept]
+    from . import rescue
+    for url in rescued:
+        rescue.take_sent(url)  # served: listed as read by the rescue
+    # Sent to the rescue on the user's approval, and back with an error: it went out all the same.
+    sent = {url: why for url, why in unread if rescue.take_sent(url)}
+    unread = [(url, why) for url, why in unread if url not in sent]
     if tool_name == "web_search":
-        from . import rescue
         data = _payload(result)
         rescue.note_search(search_rescue, bool(data.get("success")) and isinstance(data.get("data"), dict))
     pages = [p for p in pages if p["url"] not in rescued]
@@ -819,6 +824,8 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
             turn["rescued"].setdefault(url, why)
         for url, why in kept.items():
             turn["kept"].setdefault(url, why)
+        for url, why in sent.items():
+            turn["sent"].setdefault(url, why)
         if any(how == "ask" for _, _, how in kept_pages):
             turn["kept_ask"] = True
 
@@ -837,10 +844,12 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
         return None  # no web tool this turn: nothing to report
     unread = [(u, w) for u, w in turn["unread"].items() if u not in turn["opened"]]
     kept = [(u, w) for u, w in turn["kept"].items() if u not in turn["opened"] and u not in turn["rescued"]]
-    unread = [(u, w) for u, w in unread if u not in turn["kept"]]
+    sent = [(u, w) for u, w in turn["sent"].items() if u not in turn["opened"] and u not in turn["rescued"]]
+    unread = [(u, w) for u, w in unread if u not in turn["kept"] and u not in turn["sent"]]
+    kept = [(u, w) for u, w in kept if u not in turn["sent"]]
     text = footer.build(turn["opened"], turn["searched"], turn["titles"], unread, turn["attached"],
                         list(turn["rescued"].items()), turn["search_rescued"], kept,
-                        kept_hint=bool(kept) and turn.get("kept_ask", False))
+                        kept_hint=bool(kept) and turn.get("kept_ask", False), sent=sent)
     # Keep the answer byte for byte: Hermes then prints only the added footer after a streamed reply.
     return f"{response_text}\n\n{text}" if text else None
 

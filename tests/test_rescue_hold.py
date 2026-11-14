@@ -347,3 +347,72 @@ def test_the_proposed_hook_callback_follows_the_setting():
     assert rescue.pre_keyless_rescue_webgraft(tool_name="web_extract", urls=[URL]) is None
     setup()
     assert rescue.pre_keyless_rescue_webgraft(tool_name="terminal") is None
+
+
+# ---------------------------------------------------------------- a page sent on the user's approval
+
+
+def footer_for(ctx, page, session="s1"):
+    """The footer of a turn whose web_extract returned this page entry, as Hermes hands it back."""
+    [start], [record], [end] = (ctx.hooks[k] for k in ("pre_llm_call", "post_tool_call", "transform_llm_output"))
+    start(session_id=session, user_message="q")
+    fields = {k: page[k] for k in ("url", "title", "content", "error", "blocked_by_policy") if k in page}
+    record(tool_name="web_extract", args={"urls": [page["url"]]}, result=json.dumps({"results": [fields]}),
+           session_id=session)
+    return end(response_text="Answer.", session_id=session, model="m", platform="cli")
+
+
+def approved_then_back_unread(ctx, backend):
+    asyncio.run(backend.extract([URL]))  # kept here
+    pre(ctx, "web_extract", {"urls": [URL]})  # asked again: the user approved
+    [page] = asyncio.run(backend.extract([URL]))  # let through: Hermes's rescue runs on it
+    return page  # the rescue could not read it either: Hermes returns the original error
+
+
+def test_a_page_sent_on_approval_that_came_back_unread_says_it_went_out(provider):
+    ctx = setup()
+    backend, _ = provider
+    out = footer_for(ctx, approved_then_back_unread(ctx, backend))
+    assert out.endswith("No page could be read.\n"
+                        "Sent to Hermes's keyless rescue on your approval; it could not read it either:\n"
+                        f"- {URL} ({CERT[:77]}...)")
+    assert "Refused or unreadable" not in out and "kept on this machine" not in out
+
+
+def test_the_send_is_reported_once(provider):
+    ctx = setup()
+    backend, _ = provider
+    page = approved_then_back_unread(ctx, backend)
+    assert "Sent to Hermes's keyless rescue" in footer_for(ctx, page)
+    later = footer_for(ctx, {k: v for k, v in page.items() if k != "blocked_by_policy"})
+    assert "Sent to" not in later and "Refused or unreadable:" in later
+
+
+def test_nothing_is_said_sent_when_hermes_would_not_rescue_the_call(provider, monkeypatch):
+    ctx = setup()
+    backend, _ = provider
+    asyncio.run(backend.extract([URL]))
+    pre(ctx, "web_extract", {"urls": [URL]})
+    monkeypatch.setattr(rescue, "hermes_rescues", lambda: False)  # web.keyless_rescue turned off meanwhile
+    [page] = asyncio.run(backend.extract([URL]))
+    out = footer_for(ctx, page)
+    assert "Sent to" not in out and "Refused or unreadable:" in out
+
+
+def test_a_page_the_rescue_served_is_listed_as_read_by_it_not_as_sent(provider):
+    ctx = setup()
+    backend, _ = provider
+    page = approved_then_back_unread(ctx, backend)
+    served = {"url": URL, "title": "badssl", "content": "self-signed.badssl.com " * 5, "error": None}
+    out = footer_for(ctx, served)
+    assert "Read by Hermes's keyless rescue (an outside service), not on this machine:" in out
+    assert "Sent to" not in out
+    assert "Sent to" not in footer_for(ctx, page)  # the served call used up the report
+
+
+def test_the_sent_line_follows_hermes_language(provider, monkeypatch):
+    monkeypatch.setattr(footer, "_hermes_language", lambda: "fr")
+    ctx = setup()
+    backend, _ = provider
+    out = footer_for(ctx, approved_then_back_unread(ctx, backend))
+    assert "Envoyées au secours sans clé d'Hermes avec ton accord ; il n'a pas pu les lire non plus :" in out

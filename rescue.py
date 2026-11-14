@@ -38,6 +38,7 @@ VENDORS = "Exa, Parallel, Firecrawl or Keenable"  # Hermes's keyless ring (plugi
 _lock = threading.Lock()
 _held: "OrderedDict[str, tuple[float, str]]" = OrderedDict()  # page -> (when, why webgraft could not read it)
 _approved: "OrderedDict[str, float]" = OrderedDict()  # page -> when its approval prompt was shown
+_sent: "OrderedDict[str, float]" = OrderedDict()  # page -> when an approved call let it through to the rescue
 _search_down: tuple[float, str, str] | None = None  # (when, your backend, the vendor that served it)
 
 
@@ -117,6 +118,13 @@ def hold(results: list[dict], approved: set[str] | None = None) -> list[dict]:
         url = str(r.get("url") or "")
         requested = str((r.get("metadata") or {}).get("sourceURL") or url) if isinstance(r.get("metadata"), dict) else url
         if requested in approved or url in approved:
+            with _lock:  # approved, and Hermes rescues this batch: the page goes out once
+                for u in {url, requested}:
+                    if u:
+                        _sent[_key(u)] = now
+                        _sent.move_to_end(_key(u))
+                while len(_sent) > MAX_PAGES:
+                    _sent.popitem(last=False)
             out.append(r)
             continue
         why = str(r.get("error") or "")
@@ -134,6 +142,14 @@ def hold(results: list[dict], approved: set[str] | None = None) -> list[dict]:
         out.append({**r, "error": f"{why} [kept on this machine: not sent to Hermes's keyless rescue]"[:400],
                     "blocked_by_policy": {"host": host, "rule": f"keyless_rescue: {current}", "source": SOURCE}})
     return out
+
+
+def take_sent(url: str) -> bool:
+    """Whether this page went to Hermes's keyless rescue on the user's approval, in the call whose
+    result is being read. Each send is reported once."""
+    with _lock:
+        when = _sent.pop(_key(url), None)
+    return when is not None and time.monotonic() - when < APPROVAL_SECONDS
 
 
 def held_reason(url: str) -> str:
@@ -241,4 +257,5 @@ def reset() -> None:
     with _lock:
         _held.clear()
         _approved.clear()
+        _sent.clear()
         _search_down = None
