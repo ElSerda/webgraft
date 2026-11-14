@@ -96,3 +96,92 @@ def test_status_prints_the_section_and_changes_nothing(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "What can leave this machine" in out and "Spoken replies" in out and "Microsoft" in out
     assert repr(config) == before
+
+
+# Each case below follows a rule read in Hermes's own code (v0.23.1), named in the comment.
+
+def test_names_are_compared_as_hermes_does():
+    # Hermes lower-cases and strips provider and backend names (tts_tool.py, web_tools.py).
+    config = dict(LOCAL, tts={"provider": " Piper "}, web={"search_backend": "SearXNG", "extract_backend": "WebGraft"})
+    r = rows(config)
+    assert r["Spoken replies"].kind == leaves.HERE
+    assert r["Search"].kind == leaves.NETWORK
+    assert r["Page reading"].kind == leaves.HERE
+
+
+def test_a_command_never_replaces_a_built_in_voice():
+    # tts_command_provider.py: built-in names are reserved, so tts.providers.openai.command still means OpenAI.
+    config = dict(LOCAL, tts={"provider": "openai", "providers": {"openai": {"command": "my-local-tts"}}})
+    assert rows(config)["Spoken replies"].kind == leaves.OUTSIDE
+
+
+def test_command_voices_follow_hermes_rules():
+    legacy = dict(LOCAL, tts={"provider": "mine", "mine": {"command": "say {input_path}"}})  # tts.<name>
+    assert rows(legacy)["Spoken replies"].kind == leaves.AUTO
+    not_a_command = dict(LOCAL, tts={"provider": "mine", "providers": {"mine": {"type": "http", "command": "x"}}})
+    unknown = rows(not_a_command)["Spoken replies"]
+    # Neither built-in nor command: a voice plugin of that name, else Hermes's Edge default.
+    assert unknown.kind == leaves.AUTO and "Microsoft" in unknown.where and "piper" in unknown.hint.lower()
+    blank = dict(LOCAL, tts={"provider": "mine", "providers": {"mine": {"command": "   "}}})
+    assert "plugin" in rows(blank)["Spoken replies"].where
+    nous = rows(dict(LOCAL, tts={"provider": "nous"}))["Spoken replies"]
+    assert nous.kind == leaves.OUTSIDE and "Nous" in nous.where
+
+
+def test_keyless_rescue_off_switches_read_as_hermes_reads_them():
+    # web_tools_rescue.py: `not web.keyless_rescue` turns it off, and so does web.keyless_fallback: false.
+    for value in (False, 0, None):
+        assert rows(dict(LOCAL, web={**LOCAL["web"], "keyless_rescue": value}))["Keyless rescue"].kind == leaves.OFF
+    fallback_off = rows(dict(LOCAL, web={**LOCAL["web"], "keyless_fallback": False}), mode="off")["Keyless rescue"]
+    assert fallback_off.kind == leaves.OFF and "keyless_fallback" in fallback_off.where
+    # The string "false" is truthy for Hermes there: the rescue stays on, so it is not reported off.
+    assert rows(dict(LOCAL, web={**LOCAL["web"], "keyless_rescue": "false"}), mode="off")["Keyless rescue"].kind \
+        == leaves.OUTSIDE
+
+
+def test_voice_input_follows_hermes():
+    # stt.enabled goes through is_truthy_value (utils.py): only 1, true, yes, on count as on.
+    for value in (False, "false", "no", "off", 0):
+        assert rows(dict(LOCAL, stt={"enabled": value, "provider": "groq"}))["Voice input"].kind == leaves.OFF
+    assert rows(dict(LOCAL, stt={"enabled": "yes", "provider": "groq"}))["Voice input"].kind == leaves.OUTSIDE
+    assert rows(dict(LOCAL, stt={"provider": "local_command"}))["Voice input"].kind == leaves.HERE
+    cloud = rows(dict(LOCAL, stt={"provider": "openai"}))["Voice input"]
+    assert cloud.kind == leaves.OUTSIDE and "local" in cloud.hint
+
+
+def test_model_addresses():
+    assert rows(dict(LOCAL, model={}))["Model"].kind == leaves.AUTO
+    lan = rows(dict(LOCAL, model={"provider": "custom", "base_url": "http://192.168.1.20:1234/v1"}))["Model"]
+    assert lan.kind == leaves.NETWORK and lan.hint == ""
+    remote = rows(dict(LOCAL, model={"provider": "custom", "base_url": "https://api.example.com/v1"}))["Model"]
+    assert remote.kind == leaves.OUTSIDE and "api.example.com" in remote.where and remote.hint
+    config = dict(LOCAL, fallback_providers=[{"provider": "ollama"}, "not a dict"],
+                  auxiliary={"vision": {"provider": "auto", "base_url": "http://nas:1234/v1"}})
+    kinds = {row.what: row.kind for row in leaves.report(config, "http://serveur.local/searxng", "ask")}
+    assert kinds["Fallback model"] == leaves.HERE
+    assert kinds["Side model (vision)"] == leaves.NETWORK
+
+
+def test_search_backends():
+    public = rows(LOCAL, url="https://searx.example.org")["Search"]
+    assert public.kind == leaves.OUTSIDE
+    assert rows(dict(LOCAL, web={"search_backend": "brave"}))["Search"].kind == leaves.OUTSIDE
+    assert rows(dict(LOCAL, web={"backend": "searxng"}))["Search"].kind == leaves.NETWORK  # web.backend
+    assert rows(dict(LOCAL, web={}))["Search"].kind == leaves.AUTO
+
+
+def test_where_ipv6():
+    assert leaves.where("http://[::1]:1234/v1")[0] == leaves.HERE
+    assert leaves.where("http://[fe80::1]/")[0] == leaves.NETWORK
+    assert leaves.where("http://[fd00::5]/")[0] == leaves.NETWORK
+    assert leaves.where("http://[2606:4700::1111]/")[0] == leaves.OUTSIDE
+
+
+def test_status_reads_searxng_url_from_the_environment_and_prints_hints(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_config", lambda: {"web": {"search_backend": "searxng"}})
+    monkeypatch.setattr(cli, "_secret", lambda name: "")
+    monkeypatch.setenv("SEARXNG_URL", "http://192.168.1.5:8080")
+    cli.print_leaves()
+    out = capsys.readouterr().out
+    assert "your SearXNG at 192.168.1.5" in out
+    assert "to keep it here" in out

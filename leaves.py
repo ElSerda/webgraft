@@ -21,6 +21,9 @@ HERE, NETWORK, HELD, OUTSIDE, AUTO, OFF = "here", "network", "held", "outside", 
 # Providers whose server runs on this machine unless base_url says otherwise (Hermes's defaults).
 LOCAL_SERVERS = {"lmstudio": "http://localhost:1234/v1", "ollama": "http://localhost:11434/v1"}
 LOCAL_VOICES = {"piper", "kittentts", "neutts"}
+# Hermes's built-in voices (tools/tts_command_provider.py): a command under one of these names is ignored.
+BUILTIN_VOICES = {"edge", "elevenlabs", "openai", "minimax", "xai", "mistral", "gemini", "neutts", "kittentts",
+                  "piper", "deepinfra"}
 TTS_SERVICES = {"edge": "Microsoft's Edge speech service", "nous": "Nous's Tool Gateway"}
 STT_LOCAL = {"local", "local_command"}
 VENDORS = "Exa, Parallel, Firecrawl or Keenable"
@@ -72,6 +75,32 @@ def _section(config: dict, name: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _name(value: Any) -> str:
+    """A provider or backend name as Hermes compares it: stripped, lower case."""
+    return str(value or "").strip().lower()
+
+
+def _truthy(value: Any, default: bool) -> bool:
+    """Hermes's is_truthy_value (utils.py): a string counts only as 1, true, yes or on."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _command_voice(tts: dict, voice: str) -> bool:
+    """Hermes's rule for a command voice: not a built-in name, tts.providers.<name> (else tts.<name>)
+    with type command or none, and a command."""
+    if not voice or voice in BUILTIN_VOICES:
+        return False
+    block = _section(tts, "providers").get(voice)
+    if not isinstance(block, dict):
+        block = _section(tts, voice)
+    command = block.get("command")
+    return _name(block.get("type")) in ("", "command") and isinstance(command, str) and bool(command.strip())
+
+
 def report(config: dict, searxng_url: str = "", rescue_mode: str = "ask") -> list[Row]:
     """One row per place Hermes may send a conversation's data, from its config."""
     rows: list[Row] = []
@@ -93,7 +122,7 @@ def report(config: dict, searxng_url: str = "", rescue_mode: str = "ask") -> lis
                                    f"auxiliary.{task}.provider: auto (your main model)"))
 
     web = _section(config, "web")
-    search = str(web.get("search_backend") or web.get("backend") or "")
+    search = _name(web.get("search_backend") or web.get("backend"))
     if search == "searxng":
         if searxng_url:
             kind, host = where(searxng_url)
@@ -108,7 +137,7 @@ def report(config: dict, searxng_url: str = "", rescue_mode: str = "ask") -> lis
     else:
         rows.append(Row("Search", AUTO, "Hermes picks a backend from your keys", "`hermes webgraft setup` to choose"))
 
-    reading = str(web.get("extract_backend") or web.get("backend") or "")
+    reading = _name(web.get("extract_backend") or web.get("backend"))
     if reading == "webgraft":
         rows.append(Row("Page reading", HERE, "each page is fetched from its own site and read here (webgraft)"))
     else:
@@ -116,8 +145,10 @@ def report(config: dict, searxng_url: str = "", rescue_mode: str = "ask") -> lis
                         f"{reading} (the page's address goes to that service)" if reading else "Hermes picks a backend",
                         "`hermes webgraft setup` sets webgraft"))
 
-    if web.get("keyless_rescue", True) is False:
+    if not web.get("keyless_rescue", True):  # Hermes's own tests, in tools/web_tools_rescue.py
         rows.append(Row("Keyless rescue", OFF, "off in Hermes (web.keyless_rescue: false)"))
+    elif not web.get("keyless_fallback", True):
+        rows.append(Row("Keyless rescue", OFF, "off in Hermes (web.keyless_fallback: false)"))
     elif rescue_mode == "block":
         rows.append(Row("Keyless rescue", HELD, "refused (keyless_rescue: block), "
                                                 "but the first search of an outage still goes out",
@@ -132,19 +163,22 @@ def report(config: dict, searxng_url: str = "", rescue_mode: str = "ask") -> lis
                         "webgraft's keyless_rescue: ask, or web.keyless_rescue: false"))
 
     tts = _section(config, "tts")
-    voice = str(tts.get("provider") or "edge")
-    custom = _section(tts, "providers").get(voice)
+    voice = _name(tts.get("provider")) or "edge"
+    piper = "a local voice: Piper (`hermes tools`, Voice & TTS), then tts.provider: piper"
     if voice in LOCAL_VOICES:
         rows.append(Row("Spoken replies", HERE, voice))
-    elif isinstance(custom, dict) and custom.get("command"):
+    elif _command_voice(tts, voice):
         rows.append(Row("Spoken replies", AUTO, f"{voice}: your own command (it decides)"))
+    elif voice not in BUILTIN_VOICES and voice not in TTS_SERVICES:
+        rows.append(Row("Spoken replies", AUTO, f"{voice}: a voice plugin of that name if one is installed, "
+                                                "else Microsoft's Edge speech service", piper))
     else:
         rows.append(Row("Spoken replies", OUTSIDE, TTS_SERVICES.get(voice, f"{voice} (an outside voice service)"),
-                        "a local voice: Piper (`hermes tools`, Voice & TTS), then tts.provider: piper"))
+                        piper))
 
     stt = _section(config, "stt")
-    heard = str(stt.get("provider") or "")
-    if stt.get("enabled", True) is False:
+    heard = _name(stt.get("provider"))
+    if not _truthy(stt.get("enabled"), True):
         rows.append(Row("Voice input", OFF, "off (stt.enabled: false)"))
     elif heard in STT_LOCAL:
         rows.append(Row("Voice input", HERE, heard))
