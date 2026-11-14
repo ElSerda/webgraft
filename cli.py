@@ -21,7 +21,7 @@ import stat
 import subprocess
 import sys
 
-from . import browser, compat, extract
+from . import browser, compat, extract, leaves, rescue
 
 CRAWL4AI_REQUIREMENT = "crawl4ai>=0.9.1,<0.10"  # 0.9.0 and older need lxml 5: no Python 3.14 wheels
 TEST_PAGE = "https://www.iana.org/help/example-domains"
@@ -153,6 +153,24 @@ def print_state(s: dict, title: str = "webgraft status") -> None:
     limit = s.get("char_limit")
     ok(f"Page window        {limit if limit is not None else HERMES_CHAR_LIMIT} characters per page"
        + ("" if limit is not None else " (Hermes's default)"))
+
+
+PLACES = {leaves.HERE: "this machine", leaves.NETWORK: "your network", leaves.HELD: "held by webgraft",
+          leaves.OUTSIDE: "outside",
+          leaves.AUTO: "decided at run time", leaves.OFF: "off"}
+
+
+def print_leaves() -> None:
+    """Where a conversation's data goes, from Hermes's config (read-only: webgraft changes none of it)."""
+    header("What can leave this machine")
+    import os
+    searxng = _secret("SEARXNG_URL") or os.environ.get("SEARXNG_URL", "").strip()
+    for row in leaves.report(_config(), searxng, rescue.mode()):
+        line = f"{row.what:<19}{PLACES[row.kind]}: {row.where}"
+        (ok if row.kind in (leaves.HERE, leaves.NETWORK, leaves.OFF) else warn)(line)
+        if row.hint:
+            info(f"{'':<19}to keep it here: {row.hint}")
+    info("Read from Hermes's config only. webgraft changes none of it.")
 
 
 # ---------------------------------------------------------------- asking
@@ -623,6 +641,7 @@ def handle(args) -> int:
     command = getattr(args, "webgraft_command", None)
     if command == "status":
         print_state(state())
+        print_leaves()
         return 0
     if command == "uninstall":
         if not args.yes and not sys.stdin.isatty():

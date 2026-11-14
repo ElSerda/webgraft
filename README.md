@@ -261,6 +261,8 @@ Non-interactive: `hermes webgraft setup --yes --search ddgs --crawl4ai --ocr --s
 
 Check at any time with `hermes webgraft status`.
 
+`status` also lists **what can leave this machine**, read from Hermes's config: the model and any fallback or side model, the search, page reading, the keyless rescue, spoken replies (edge, Hermes's default voice, goes to Microsoft) and voice input. Each is marked this machine, your network, held by webgraft, outside, or decided at run time, with what keeps it here (for the voice: Piper, a local voice Hermes supports). webgraft changes none of these settings.
+
 ### Uninstall
 
 ```
@@ -360,6 +362,7 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
 
 - **Reads:**
   - `web.extract_char_limit` (for `setup` and `status`) and `display.language` in `config.yaml`;
+  - for `status` only, to say what can leave this machine: `model`, `fallback_providers`, `auxiliary`, `web`, `tts` and `stt` in `config.yaml`, and `SEARXNG_URL`; nothing is written;
   - `hermes pm env chromium` and `browser.executable_path`, during `setup`, to find Hermes's Chromium.
 
 - **No telemetry**, no credentials read, no self-update.
