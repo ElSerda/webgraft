@@ -136,6 +136,8 @@ def _page_with_view(monkeypatch, view, status=200):
         return view
     monkeypatch.setattr(ex, "_download", download)
     monkeypatch.setattr(ex, "browser_view", fake_view)
+    # HTML has text: the browser opens it only with browser: always, the path these tests check
+    monkeypatch.setattr(ex, "setting", lambda key, default: "always" if key == "browser" else default)
     return asyncio.run(ex._read_page_itself(None, "https://site.example/specs"))
 
 

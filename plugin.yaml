@@ -37,6 +37,12 @@ config_schema:
     default: true
     label: Use the site's llms.txt
     description: "When a site's llms.txt lists a Markdown (.md) version of the page, read that instead of the HTML; checked once per hour per site"
+  browser:
+    type: str
+    choices: [when_empty, always]
+    default: when_empty
+    label: When Crawl4AI's browser opens a page
+    description: "With Crawl4AI installed. when_empty: only when the downloaded page has no text, or almost none (a page built by scripts). always: every page the site served, for values scripts fill in on a page that has text (a comparison widget), at about 4 seconds per page"
   tool_guard:
     type: str
     choices: [ask, block, off]

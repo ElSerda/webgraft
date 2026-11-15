@@ -81,6 +81,7 @@ def test_a_redirected_page_reports_where_it_ended(monkeypatch):
         return Response("https://final.example/specs"), HTML.encode("utf-8"), False
     monkeypatch.setattr(ex, "_download", download)
     monkeypatch.setattr(ex, "browser_view", _no_browser(calls))
+    monkeypatch.setattr(ex, "setting", lambda key, default: "always" if key == "browser" else default)
     page = asyncio.run(ex._read_page_itself(None, "https://short.example/x"))
     assert (page.url, page.requested, page.error) == ("https://final.example/specs", "https://short.example/x", "")
     result = page.as_result()
@@ -240,6 +241,59 @@ def test_a_script_built_page_is_completed_by_the_browser(monkeypatch):
     monkeypatch.setattr(ex, "browser_view", view)
     page = asyncio.run(ex._read_page_itself(None, "https://spa.example/specs"))
     assert page.engine == "crawl4ai" and "2617 MHz" in page.content
+
+
+# ---------------------------------------------------------------- browser: when_empty (default) / always
+
+
+def _read_with_browser(monkeypatch, body, mode=None):
+    """(page, URLs the browser was asked to open) for a downloaded page with this HTML body."""
+    calls = []
+
+    async def download(client, url):
+        return Response(url, body=body), body.encode("utf-8"), False
+
+    async def view(url):
+        calls.append(url)
+        return {"success": True, "status": 200, "title": "Specs", "markdown": "Boost clock 2617 MHz. " * 30,
+                "final_url": url}
+    monkeypatch.setattr(ex, "_download", download)
+    monkeypatch.setattr(ex, "browser_view", view)
+    if mode is not None:
+        monkeypatch.setattr(ex, "setting", lambda key, default: mode if key == "browser" else default)
+    return asyncio.run(ex._read_page_itself(None, "https://site.example/specs")), calls
+
+
+def test_by_default_a_page_with_text_is_not_opened_in_the_browser(monkeypatch):
+    page, calls = _read_with_browser(monkeypatch, HTML)
+    assert calls == [] and page.engine == "trafilatura" and not page.error and page.content
+
+
+def test_by_default_a_page_without_text_is_opened_in_the_browser(monkeypatch):
+    shell = "<html><head><title>App</title></head><body><div id='app'></div></body></html>"
+    page, calls = _read_with_browser(monkeypatch, shell)
+    assert calls == ["https://site.example/specs"] and page.engine == "crawl4ai"
+
+
+def test_a_page_whose_only_text_is_its_noscript_notice_is_opened_in_the_browser(monkeypatch):
+    shell = ("<html><head><title>App</title></head><body><noscript>You need to enable JavaScript to run "
+             "this app.</noscript><div id='root'></div></body></html>")
+    page, calls = _read_with_browser(monkeypatch, shell)
+    assert calls == ["https://site.example/specs"] and "2617 MHz" in page.content
+
+
+def test_browser_always_opens_a_page_with_text(monkeypatch):
+    page, calls = _read_with_browser(monkeypatch, HTML, mode="always")
+    assert calls == ["https://site.example/specs"]
+
+
+def test_browser_setting_values():
+    for value, mode in (("always", "always"), (" Always ", "always"), ("when_empty", "when_empty"),
+                        ("never", "when_empty"), ("", "when_empty"), (None, "when_empty")):
+        ex.setting = lambda key, default, v=value: v
+        assert ex.browser_mode() == mode, value
+    ex.setting = lambda key, default: default
+    assert ex.browser_mode() == "when_empty"
 
 
 # ---------------------------------------------------------------- user agent: Hermes's own

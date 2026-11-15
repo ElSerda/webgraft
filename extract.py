@@ -358,6 +358,22 @@ def _anchors(html: str) -> list[tuple[str, str]]:
 STRUCTURE_HEADING = "## Values stated in the page's markup"
 
 
+THIN_CHARS = 300  # below this, trafilatura did not read the page: scripts build it
+
+
+def thin(main_text: str) -> bool:
+    """trafilatura found no text, or almost none (a page built by scripts, or its noscript notice)."""
+    return len((main_text or "").strip()) < THIN_CHARS
+
+
+def browser_mode() -> str:
+    """When Crawl4AI's browser opens a page the site served: always, or only when trafilatura found
+    no text (when_empty, the default). Measured on 12 pages that have text: the browser added
+    something the download lacked on one (a comparison widget), at about 4 seconds per page."""
+    value = str(setting("browser", "when_empty") or "").strip().lower()
+    return value if value in ("always", "when_empty") else "when_empty"
+
+
 def merge(main_text: str, browser_md: str, html: str = "", view_html: str = "") -> tuple[str, str]:
     """(content, engine) from trafilatura's text, Crawl4AI's markdown and the pages' markup.
 
@@ -366,7 +382,7 @@ def merge(main_text: str, browser_md: str, html: str = "", view_html: str = "") 
     a details panel, a schema.org price) are appended: from the HTML downloaded, then from the
     browser's rendered HTML for what its scripts added (structured.py)."""
     browser_text = (browser_md or "").strip()
-    if len(main_text.strip()) < 300 and browser_text:
+    if thin(main_text) and browser_text:
         return browser_text[:READ_CHARS], "crawl4ai"
     lines = structured.values(html, main_text)
     seen = set(lines)
@@ -898,8 +914,10 @@ async def _read_page_itself(client, url: str) -> Page:
         # A bot wall served with 200 is a refusal too: no browser to get through its challenge.
         return Page(url, title, error=reason)
     # The browser starts once the page is served and read, on the address it reached: it only
-    # completes a page the site gave (spec tables, pages built by scripts).
-    view = await browser_view(final) if not is_document(final, ctype, b"") else {"success": False}
+    # completes a page the site gave (pages built by scripts; with browser: always, also the values
+    # scripts fill in on a page that has text).
+    wanted = browser_mode() == "always" or thin(main)
+    view = await browser_view(final) if wanted and not is_document(final, ctype, b"") else {"success": False}
     view_ok = view.get("success") and int(view.get("status") or 200) < 400
     if view_ok and not same_site(final, str(view.get("final_url") or "")):
         # The browser ended on another site than the page downloaded: its text is not this page's,

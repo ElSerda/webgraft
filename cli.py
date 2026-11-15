@@ -407,7 +407,7 @@ def step_crawl4ai(args, s: dict, interactive: bool) -> None:
     wanted = args.crawl4ai if args.crawl4ai is not None else _confirm(
         "Install Crawl4AI?", True, interactive,
         "Crawl4AI: about 35 packages in their own environment; it uses Hermes's Chromium.\n"
-        "It recovers spec tables and script-built pages that the main text reader misses.")
+        "It reads pages built by scripts, where the main text reader finds no text.")
     if not wanted:
         warn("Skipped. Pages are read with trafilatura alone; run setup again to add it.")
         return
