@@ -289,3 +289,67 @@ def test_the_browser_checks_tls_certificates_on_purpose():
     # Crawl4AI's own default is ignore_https_errors=True; Hermes's HTTP client checks certificates.
     assert runner.TLS_CHECKED == {"ignore_https_errors": False}
     assert "**TLS_CHECKED" in Path(runner.__file__).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- children never get Hermes's stdin
+
+
+def test_the_browser_runner_gets_an_empty_stdin(monkeypatch):
+    """In a gateway session (Kanban workers) Hermes's stdin is the gateway's control pipe with a read
+    pending; a Python child started on it hangs at startup on Windows (seen: every browser read timed out)."""
+    async def pin(url):
+        return ("a.example", "93.184.215.14")
+    monkeypatch.setattr(ex, "pinned_host", pin)
+    monkeypatch.setattr(ex, "crawl4ai_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(ex.browser, "recorded", lambda: Path("chromium"))
+    seen = {}
+
+    async def capture(*argv, **kw):
+        seen.update(kw)
+        raise OSError("stop here")
+    monkeypatch.setattr(ex.asyncio, "create_subprocess_exec", capture)
+    token = ex._user_agent.set("Mozilla/5.0 (compatible; HermesAgent/1.0)")
+    try:
+        with pytest.raises(OSError):
+            asyncio.run(ex._browser_view("https://a.example/"))
+    finally:
+        ex._user_agent.reset(token)
+    assert seen["stdin"] == asyncio.subprocess.DEVNULL
+
+
+def test_the_browser_killer_and_the_chromium_lookup_get_an_empty_stdin():
+    root = Path(ex.__file__).parent
+    extract_src = (root / "extract.py").read_text(encoding="utf-8")
+    killer = extract_src[extract_src.index("killer = await asyncio.create_subprocess_exec("):][:300]
+    assert "stdin=asyncio.subprocess.DEVNULL" in killer
+    lookup = (root / "browser.py").read_text(encoding="utf-8")
+    call = lookup[lookup.index('subprocess.run([hermes, "pm", "env", "chromium"]'):][:200]
+    assert "stdin=subprocess.DEVNULL" in call
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the hang is a Windows pipe behaviour")
+def test_a_python_child_with_an_empty_stdin_starts_beside_a_pending_pipe_read():
+    """The live failure, reduced: a parent reads its stdin pipe in a thread while it starts a Python child.
+    With stdin=DEVNULL the child runs; it is the setting the browser runner now uses."""
+    import subprocess
+    import textwrap
+    parent = textwrap.dedent('''
+        import asyncio, os, sys, threading, time
+        threading.Thread(target=lambda: os.read(0, 1), daemon=True).start()
+        time.sleep(0.3)
+        async def main():
+            p = await asyncio.create_subprocess_exec(sys.executable, "-I", "-c", "print('ok')",
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
+            out, _ = await asyncio.wait_for(p.communicate(), 20)
+            print(out.decode().strip())
+        asyncio.run(main())
+    ''')
+    # stdin stays open (not communicate()), so the parent's read stays pending, like Hermes's control pipe.
+    proc = subprocess.Popen([sys.executable, "-I", "-c", parent], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        proc.wait(timeout=40)
+        out = proc.stdout.read()
+    finally:
+        proc.kill()
+        proc.stdin.close()
+    assert out.decode().strip() == "ok"

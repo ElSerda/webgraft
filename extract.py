@@ -685,6 +685,9 @@ async def _browser_view(url: str) -> dict:
     try:
         proc = await asyncio.create_subprocess_exec(
             str(python), "-I", str(RUNNER), url, str(chromium), work,
+            # Never Hermes's stdin: in a gateway session (Kanban workers included) it is the gateway's
+            # control pipe with a read pending, and on Windows a Python started on it hangs at startup.
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env=child_env(CRAWL4AI_NO_CLOUD_NOTICE="1", WEBGRAFT_USER_AGENT=user_agent,
                           WEBGRAFT_PIN_HOST=pin[0], WEBGRAFT_PIN_ADDRESS=pin[1]), cwd=CHILD_CWD,
@@ -718,7 +721,7 @@ async def _stop_tree(proc) -> None:
     try:
         if os.name == "nt":
             killer = await asyncio.create_subprocess_exec(
-                taskkill_exe(), "/T", "/F", "/PID", str(proc.pid),
+                taskkill_exe(), "/T", "/F", "/PID", str(proc.pid), stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
                 env=child_env(), cwd=CHILD_CWD)
             await asyncio.wait_for(killer.wait(), 15)

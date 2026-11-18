@@ -87,7 +87,8 @@ def _from_pm() -> Path | None:
     if hermes is None:
         return None
     try:
-        out = subprocess.run([hermes, "pm", "env", "chromium"], capture_output=True, text=True, timeout=120)
+        out = subprocess.run([hermes, "pm", "env", "chromium"], stdin=subprocess.DEVNULL, capture_output=True,
+                             text=True, timeout=120)
         start = out.stdout.find("{")
         env = json.loads(out.stdout[start:]) if start >= 0 else {}
     except (OSError, ValueError, subprocess.TimeoutExpired):
