@@ -1231,3 +1231,13 @@ def test_findstr_that_reaches_outside_still_goes_to_the_prompt(workspace, comman
     ctx = setup()
     read_a_page(ctx, session="w1")
     assert term(ctx, command)["action"] == "approve"
+
+
+@pytest.mark.parametrize("path", ["", "  ", None])
+def test_a_search_with_a_blank_path_searches_the_workspace(workspace, path):
+    # Hermes reads a blank or null search_files path as "." (tools/file_tools.py, #112424). Seen live (2026-11-18,
+    # gpt-oss-20b worker): search_files(pattern "context", path "") went to the prompt.
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    out = pre(ctx, "search_files", session="w1", args={"pattern": "Arete", "path": path})
+    assert out == {"action": "modify", "args": {"path": str(workspace)}}

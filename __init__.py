@@ -656,9 +656,11 @@ def _pinned_write(tool_name: str, args: Any, workspace: str) -> Optional[str]:
 
 def _pinned_read(tool_name: str, args: Any, workspace: str) -> Optional[str]:
     """A relative read_file / search_files path, pinned to the card's workspace. search_files searches
-    "." (Hermes's default, the current folder) when it names no path."""
-    path = _args_dict(args).get("path", "." if tool_name == "search_files" else "")
+    "." (the current folder) when its path is missing, blank or null, as Hermes reads it (#112424)."""
+    path = _args_dict(args).get("path")
     path = path.strip() if isinstance(path, str) else ""
+    if tool_name == "search_files" and not path:
+        path = "."
     return _in_workspace_relative(path, workspace, folder=tool_name == "search_files")
 
 
