@@ -1026,10 +1026,38 @@ def _call_key(session_id: str, tool_call_id: Any) -> str:
     return f"{session_id}\x00{tool_call_id or ''}"
 
 
+def _bridged_call(args: Any) -> Optional[tuple[str, Any]]:
+    """What a tool_call that reaches pre_tool_call still wrapped would run, by Hermes's own resolver.
+
+    Hermes unwraps a well-formed tool_call before the hooks (agent/tool_executor.py,
+    _unwrap_tool_search_call), so they see the real tool. The wrapper still reaches them when Hermes
+    cannot resolve the call (seen live: a local model leaking its chat template into a call named
+    tool_call), which Hermes answers with its own error, running nothing; and for a connector batch,
+    whose entries tools/connectors/dispatch.py runs through the hooks one by one. None for both.
+    Otherwise (name, arguments) of the tool it would run; the wrapper itself when the resolver cannot
+    be used (older Hermes, outside Hermes), guarded as any tool."""
+    try:
+        from tools import tool_search as ts
+        name, inner, error = ts.resolve_underlying_call(args if isinstance(args, dict) else {})
+        sentinel = ts.CONNECTOR_BATCH_SENTINEL
+    except Exception:  # noqa: BLE001
+        return TOOL_CALL_DISPATCHER, args
+    if error or not name or name == sentinel:
+        return None
+    return str(name), inner
+
+
 def _guard_tool(tool_name: str = "", args: Any = None, session_id: str = "", tool_call_id: Any = None,
                 task_id: Any = None, **_: Any) -> Optional[dict]:
+    wrapped = tool_name == TOOL_CALL_DISPATCHER
+    if wrapped:
+        if (bridged := _bridged_call(args)) is None:
+            return None  # Hermes's own error, or a connector batch whose entries come here one by one
+        tool_name, args = bridged
     conversation = _session_of(session_id, task_id)
-    if tool_name == "web_extract":
+    if wrapped and tool_name == "web_extract":
+        directive = None  # one URL per call trims the arguments, which on a wrapper the tool never sees
+    elif tool_name == "web_extract":
         directive = _one_url(args, session_id, tool_call_id)
     else:
         if tool_name == "delegate_task":
@@ -1038,6 +1066,11 @@ def _guard_tool(tool_name: str = "", args: Any = None, session_id: str = "", too
                 while len(_delegations) > MAX_SESSIONS * 4:
                     _delegations.popitem(last=False)
         directive = _tool_guard(tool_name, conversation, args)
+        if wrapped and directive and directive.get("action") == "modify":
+            # Hermes would apply the change to the wrapper's arguments, which the tool never sees: ask.
+            directive = ({"action": "block", "message": GUARD_BLOCK} if guard_mode() == "block" else
+                         {"action": "approve", "message": GUARD_ASK.format(tool=tool_name),
+                          "rule_key": f"webgraft:tool_guard:{tool_name}"})
     # The tools a script runs (execute_code) reach pre_tool_call only: Hermes leaves the post event to
     # the outer call (model_tools.suppress_post_tool_call_hook). Seen live: a script's web_extract never
     # reached post_tool_call. So a call that brings web content marks the conversation here as well,

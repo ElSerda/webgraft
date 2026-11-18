@@ -1050,3 +1050,81 @@ def test_execute_code_refusals_point_to_the_free_ways(workspace):
     read_a_page(ctx, session="w1")
     out = pre(ctx, "execute_code", session="w1", args={"code": "open('x','w')"})
     assert out["action"] == "approve" and "write_file" in out["message"]
+
+
+# ---------------------------------------------------------------- a tool_call that reaches the hook still wrapped
+# Hermes unwraps a well-formed tool_call before pre_tool_call (agent/tool_executor.py, _unwrap_tool_search_call):
+# the hook sees the real tool. The wrapper still reaches it when Hermes cannot resolve the call (it then answers
+# with its own error and runs nothing) and for a connector batch (tools/connectors/dispatch.py runs each entry
+# through the hooks on its own). Seen live (2026-11-18): Gemma 4 leaked its template into a call named tool_call,
+# and webgraft answered "requires approval", which a Kanban worker cannot get, instead of Hermes's own error.
+
+
+@pytest.fixture
+def hermes_bridge(monkeypatch):
+    """Hermes's tools.tool_search, reduced to the contract webgraft uses: resolve_underlying_call returns
+    (name, arguments, None), (CONNECTOR_BATCH_SENTINEL, {"calls": ...}, None), or (None, {}, error)."""
+    import types
+    fake = types.ModuleType("tools.tool_search")
+    fake.CONNECTOR_BATCH_SENTINEL = "connectors__execute"
+
+    def resolve_underlying_call(args, session_tool_names=None):
+        calls = args.get("calls")
+        if not isinstance(calls, list) or not calls or not all(isinstance(c, dict) and c.get("name") for c in calls):
+            return None, {}, "tool_call requires 'calls' (an array of {name, arguments})"
+        if calls[0]["name"].startswith("connectors__"):
+            return fake.CONNECTOR_BATCH_SENTINEL, {"calls": calls}, None
+        return calls[0]["name"], calls[0].get("arguments") or {}, None
+
+    fake.resolve_underlying_call = resolve_underlying_call
+    package = types.ModuleType("tools")
+    package.tool_search = fake
+    monkeypatch.setitem(sys.modules, "tools", package)
+    monkeypatch.setitem(sys.modules, "tools.tool_search", fake)
+    return fake
+
+
+@pytest.mark.parametrize("args", [{}, {"name": ""}, {"calls": "<|tool_call>call:web_search{}"}, {"calls": [{}]}])
+def test_a_tool_call_hermes_cannot_resolve_gets_hermes_own_error(hermes_bridge, args):
+    ctx = setup()
+    read_a_page(ctx)
+    assert pre(ctx, "tool_call", args=args) is None
+
+
+def test_a_connector_batch_is_guarded_entry_by_entry_not_as_a_wrapper(hermes_bridge):
+    ctx = setup()
+    read_a_page(ctx)
+    batch = {"calls": [{"name": "connectors__mail__send", "arguments": {"to": "x"}}]}
+    assert pre(ctx, "tool_call", args=batch) is None
+    assert pre(ctx, "connectors__mail__send", args={"to": "x"})["action"] == "approve"  # what Hermes then sends
+
+
+def test_a_wrapped_call_hermes_can_run_is_guarded_as_its_real_tool(hermes_bridge):
+    ctx = setup()
+    read_a_page(ctx)
+    out = pre(ctx, "tool_call", args={"calls": [{"name": "mcp__mail__send", "arguments": {"to": "x"}}]})
+    assert out["action"] == "approve" and out["rule_key"] == "webgraft:tool_guard:mcp__mail__send"
+    assert "mcp__mail__send" in out["message"]
+
+
+def test_a_wrapped_change_of_arguments_becomes_a_question(hermes_bridge, workspace):
+    # webgraft pins a worker's terminal by changing its arguments; on a wrapper Hermes would change the
+    # wrapper's arguments, which the tool never sees.
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    out = pre(ctx, "tool_call", session="w1", args={"calls": [{"name": "terminal", "arguments": {"command": "ls"}}]})
+    assert out["action"] == "approve" and out["rule_key"] == "webgraft:tool_guard:terminal"
+
+
+def test_a_wrapped_call_reads_the_web_like_the_real_tool(hermes_bridge):
+    ctx = setup()
+    assert pre(ctx, "tool_call", args={"calls": [{"name": "web_extract", "arguments": {"urls": ["https://a.example/"]}}]}) is None
+    assert pre(ctx, "terminal", args={"command": "echo hi"})["action"] == "approve"
+
+
+def test_without_hermes_resolver_the_wrapper_is_still_guarded(monkeypatch):
+    monkeypatch.setitem(sys.modules, "tools.tool_search", None)  # import fails: older Hermes, or outside it
+    ctx = setup()
+    read_a_page(ctx)
+    out = pre(ctx, "tool_call", args={})
+    assert out["action"] == "approve" and out["rule_key"] == "webgraft:tool_guard:tool_call"
