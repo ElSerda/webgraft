@@ -393,6 +393,9 @@ TERMINAL_FILE_PROGRAMS = frozenset({
     "grep", "egrep", "fgrep", "diff", "cmp", "comm", "mkdir", "touch", "cp", "mv", "rm", "rmdir", "tee",
     "basename", "dirname", "realpath", "stat", "file", "du", "tree", "date", "true", "false", "test",
     "nl", "fold", "fmt", "paste", "column", "md5sum", "sha1sum", "sha256sum", "find",
+    # Windows's grep, which models use there. Its options naming a file or folder (-g: -f: -d:, or the
+    # /x forms, which Git Bash mangles anyway) fall to the rules below: an option with ":", a rooted word.
+    "findstr",
 })
 TERMINAL_VERSION_FLAGS = frozenset({"--version", "-V", "-v", "version"})
 FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})

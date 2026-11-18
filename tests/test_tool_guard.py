@@ -1199,3 +1199,35 @@ def test_a_relative_read_that_leaves_the_workspace_still_goes_to_the_prompt(work
 def test_a_relative_read_is_left_to_hermes_before_any_web_content(workspace):
     ctx = setup()
     assert pre(ctx, "read_file", session="w1", args={"path": "route.md"}) is None
+
+
+# ---------------------------------------------------------------- findstr, Windows's grep
+# Seen live (2026-11-18, Qwen 3.5 9B worker): `ls -la "<workspace>/" | findstr -i qwen` went to the prompt, which
+# nobody answers in a worker. findstr reads text like grep; its options that name a file or folder (-g:, -f:, -d:,
+# or with a slash) are refused by the rules every program follows (an option with ":" in it, a rooted word).
+
+
+@pytest.mark.parametrize("command", [
+    "ls -la \"{ws}/\" | findstr -i qwen",
+    "findstr -s -i -n arete *.md",
+    "findstr.exe -i arete notes.md",
+    "cat notes.md | findstr -v -i draft > filtered.md",
+])
+def test_findstr_in_the_workspace_runs_without_approval(workspace, command):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    assert term(ctx, command.format(ws=str(workspace).replace("\\", "/")))["action"] == "modify"
+
+
+@pytest.mark.parametrize("command", [
+    "findstr -i arete C:/Windows/win.ini",
+    "findstr -i arete ../t_other/notes.md",
+    "findstr -g:C:/secret/list.txt notes.md",
+    "findstr -f:../files.txt arete",
+    "findstr -d:C:/Windows arete *.ini",
+    "findstr /i arete notes.md",
+])
+def test_findstr_that_reaches_outside_still_goes_to_the_prompt(workspace, command):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    assert term(ctx, command)["action"] == "approve"
