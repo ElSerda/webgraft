@@ -78,9 +78,9 @@ webgraft fixes the first two, pushes against the third, and shows which pages th
    - **What the page's own markup states** is added back under "Values stated in the page's markup", when the main text lacks it, read from standards only: table rows whose first cell is a label, `dt`/`dd` lists, and schema.org data (microdata or JSON-LD) of any type: a product's price and currency, an event's date, a recipe's time.
    - Left out: schema.org types that describe the site around the page (breadcrumbs, the publisher, the site search), links, images and rating scales. No class name, no word list, no site convention: a label with more letters than digits, at most 8,000 characters.
 
-4. **With Crawl4AI installed**, a page the site served (status 200, no bot wall) is also opened in a headless browser (the Chromium Hermes installs), with the same `HermesAgent` User-Agent.
-   - The browser's rendered HTML is read the same way, for the values its scripts filled in.
-   - Pages that trafilatura cannot read, because scripts build them (Vue, React...), use the browser view instead: the browser waits for the page to load, then one more second for its scripts to fetch their data.
+4. **With Crawl4AI installed**, a page the site served (status 200, no bot wall) where trafilatura found no text, or almost none (under 300 characters), is opened in a headless browser (the Chromium Hermes installs), with the same `HermesAgent` User-Agent.
+   - These are pages built by scripts (Vue, React...): the browser waits for the page to load, then one more second for its scripts to fetch their data, and its view is read instead.
+   - With `browser: always`, every page the site served is also opened, and the browser's rendered HTML is read the same way, for the values its scripts filled in. It costs about 4 seconds per page. Measured on 12 pages that have text (product pages, specs, docs, an issue), the download already held what the browser added on all but one, where the browser added a comparison widget filled in by scripts.
    - The browser only completes what the site served. A page the site refused (403, 429...) or a bot wall is never re-read in the browser: that would be getting past the site's answer.
 
 5. **Errors come from the HTTP status only**: a 404, 410, 403 or 5xx is reported as such.
@@ -235,6 +235,13 @@ Local test site with injected pages (a code word to start the reply with, a URL 
 
 For research only, give Hermes only the web tools: `hermes chat -t web`. A page then has nothing to act on this machine with.
 
+### Isolation
+
+None of the above is a boundary. Hermes's security policy puts the boundary at the operating system: for an agent that reads the open web, the supported setup is the whole Hermes process inside a sandbox, Hermes's Docker image or NVIDIA OpenShell ([SECURITY.md](https://github.com/NousResearch/hermes-agent/blob/main/SECURITY.md), §2.2).
+
+- webgraft does not replace that isolation.
+- Inside such a sandbox, webgraft runs with the rest of Hermes: its Crawl4AI browser and its child processes are confined too.
+
 ## Install
 
 Requires Hermes Agent 0.22.6 or later.
@@ -312,6 +319,7 @@ Under Settings → Plugins in Hermes Desktop, or `plugins.entries.webgraft.setti
 | `remind` | `true` | Add a short note to each user message (about 110 tokens), marked as a note and not the request: search snippets are not sources, open the pages, and open the pages a multi-URL call left out. When the message holds a URL, the note asks to open that page instead of searching |
 | `one_url_per_call` | `true` | A `web_extract` call that asks for several URLs reads only the first; the result lists the others |
 | `llms_txt` | `true` | When the site's `llms.txt` lists a Markdown version of the page, read that instead of the HTML |
+| `browser` | `when_empty` | With Crawl4AI installed: open a page in its browser only when the downloaded page has no text or almost none, a page built by scripts (`when_empty`), or every page the site served, for values scripts fill in (`always`, about 4 seconds per page) |
 | `keyless_rescue` | `ask` | What happens when Hermes's keyless rescue would send a page or a search to an outside service: webgraft keeps it and asks first (`ask`, refused where nobody can answer), never sends it (`block`), or leaves it to Hermes (`off`). See [Hermes's keyless rescue](#limits) |
 | `respect_ai_optout` | `true` | A page that asks not to be used by AI (`noai`, `tdm-reservation: 1`) comes back as an error |
 | `tool_guard` | `ask` | Once the conversation has read web content, tools that are not read-only go to Hermes's approval prompt (`ask`, refused where nobody can answer), are refused (`block`), or run as usual (`off`). See [Prompt injection](#prompt-injection) |
@@ -335,7 +343,7 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
 
 - **Network:** downloads the URLs the agent asks `web_extract` to read, directly from this machine, with Hermes's HTTP client and its User-Agent (`HermesAgent`, the browser uses the same), and, with `llms_txt` on, each site's `/llms.txt` once per hour (plus the `.md` version of a page it lists).
   - `setup` also checks the SearXNG URL you give it and reads two test pages on iana.org; with OCR chosen, RapidOCR downloads its models once from modelscope.cn (SHA-256 checked).
-  - Crawl4AI's browser loads the same URLs, runs their scripts and loads their page assets.
+  - Crawl4AI's browser loads the same URLs (only those where the download found no text, unless `browser: always`), runs their scripts and loads their page assets.
 
 - **Private addresses:**
   - pages, `/llms.txt` and `.md` versions are fetched with Hermes's SSRF-safe client (`tools.url_safety`), which refuses private, loopback, link-local and cloud metadata addresses on every redirect hop;
@@ -343,10 +351,10 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
   - a result names the page actually read in `url` (the requested URL is in `metadata.sourceURL`), so Hermes re-checks a redirect target against its SSRF and website policies;
   - the browser starts only after that download, on the address it reached, and its view is dropped when the page it ended on (after its own redirects and script navigation) is not a public address, or is on another site than the page downloaded;
   - **the page's host is pinned:** webgraft resolves it, checks every answer with Hermes's SSRF check, and tells Chromium to use that address (`--host-resolver-rules`). Without it, a name that answers a public address to the download and 127.0.0.1 to the browser a moment later (DNS rebinding) let the browser read a local service under a public name: shown with a local test server, where the page came back with its content and passed the end-of-page check. A host that resolves to any private address gets no browser at all;
-  - **Limit:** what the page itself requests from other hosts (images, scripts, `fetch` calls) is not checked or pinned, so a hostile page can make the browser send requests to your network, as any browser that opened it could. If that matters on your network, skip Crawl4AI in `setup`: pages are then read by the SSRF-safe client alone.
+  - **Limit:** what the page itself requests from other hosts (images, scripts, `fetch` calls) is not checked or pinned, so a hostile page can make the browser send requests to your network, as any browser that opened it could. If that matters on your network, skip Crawl4AI in `setup`: pages are then read by the SSRF-safe client alone, or run Hermes in a sandbox (see "Isolation" under Prompt injection).
 
 - **Processes:**
-  - one Crawl4AI child process per page, at most three at once in the whole Hermes process, each stopped after 60 seconds; it starts Hermes's Chromium headless (DevTools port on 127.0.0.1, temporary profile) and stops it before exiting;
+  - one Crawl4AI child process per page the browser opens, at most three at once in the whole Hermes process, each stopped after 60 seconds; it starts Hermes's Chromium headless (DevTools port on 127.0.0.1, temporary profile) and stops it before exiting;
   - one child process per document (Hermes's own Python running `doc_reader.py` with anydoc), stopped after 60 seconds;
   - for a scanned PDF with OCR installed, one more child process (`ocr_runner.py` in the OCR environment), stopped after 100 seconds.
   - Each child is also stopped when Hermes ends the call first (`web.extract_timeout`, 120 seconds by default) or the turn is interrupted. A Crawl4AI read is stopped with its Chromium; the browser profile and Crawl4AI's own log and cache live in a temporary folder that webgraft creates and removes, killed read or not. Folders of that kind left by an earlier run (Hermes stopped mid-read, or an older webgraft) are removed when they are more than an hour old, once per Hermes process, at the first browser read; only webgraft's own `webgraft-browser-`, `webgraft-chromium-` and `webgraft-crawl4ai-` folders in the temp folder are touched.
