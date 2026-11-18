@@ -1220,7 +1220,9 @@ def test_findstr_in_the_workspace_runs_without_approval(workspace, command):
 
 
 @pytest.mark.parametrize("command", [
-    "findstr -i arete C:/Windows/win.ini",
+    "findstr -i arete /etc/hosts",
+    pytest.param("findstr -i arete C:/Windows/win.ini",  # a relative folder named C: elsewhere
+                 marks=pytest.mark.skipif(os.name != "nt", reason="a drive path is Windows's")),
     "findstr -i arete ../t_other/notes.md",
     "findstr -g:C:/secret/list.txt notes.md",
     "findstr -f:../files.txt arete",

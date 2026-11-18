@@ -7,6 +7,8 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _pkg import load  # noqa: E402
@@ -72,6 +74,7 @@ def test_programs_are_never_taken_from_the_current_folder(tmp_path, monkeypatch)
     assert browser.which(name) is None
 
 
+@pytest.mark.skipif(os.name != "nt", reason="taskkill is Windows's; elsewhere the runner's process group is killed")
 def test_taskkill_is_run_by_its_full_path():
     path = ex.taskkill_exe()
     assert os.path.isabs(path) and path.lower().endswith(os.path.join("system32", "taskkill.exe"))
