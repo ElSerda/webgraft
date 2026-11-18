@@ -15,8 +15,8 @@
 # then a step of webgraft's own, not part of Nous's CI:
 #   3. preview  website/scripts/extract-plugins.py on the entry alone, as the docs deploy publishes it:
 #      what Hermes Desktop / CLI and the /docs/plugins page will show (tools/catalog_preview.py),
-#      and webgraft's rule that the description stays one short line (the disclosure goes in the
-#      PR and the README, rule 13).
+#      and webgraft's rule that the summary before "Disclosure —" (the maintainers' rule 13 lines,
+#      since 6541a26) stays one short line.
 # The Python version and the ruamel.yaml pin are read from their workflow, in a throwaway uv venv.
 # If Nous changes that workflow, the run stops and says so: read the change, then update this file.
 # tools/catalog_ci_windows.py adapts their Linux script to Windows without changing it.
