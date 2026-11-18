@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -267,7 +268,9 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
     # Web content read earlier in the conversation is still in the context (also after a restart).
     # A continuation session (Hermes's lineage on compression) or a subagent inherits its parent's mark.
     parent = str(_.get("parent_session_id") or "")
-    if _web_in_history(conversation_history) or (parent and _is_marked(parent)):
+    card = _kanban_card()
+    inherited = bool(card) and _inherits_web(card, user_message)  # always read: it notes handed-on files
+    if inherited or _web_in_history(conversation_history) or (parent and _is_marked(parent)):
         _mark_web(session_id)
     # An interrupted turn never reaches the transform hook, so its record is dropped here.
     with _lock:
@@ -344,6 +347,34 @@ READ_ONLY_TOOLS = frozenset({
     "web_search", "web_extract", "x_search",
     "skill_view", "skills_list", "todo_list", "clarify",
 })
+# Hermes's Kanban board. A worker the dispatcher spawns for a card runs with nobody to answer an
+# approval prompt, so a tool sent to the prompt is refused at once. Its board tools are how it hands
+# its work back, as a chat does in its final answer (not a tool, never guarded). Seen live
+# (2026-11-17): after its web research a worker's kanban_complete and kanban_comment were refused, it
+# answered in text, and Hermes counted three failed runs and blocked the card. So reading the board
+# stays free, and on the worker's own card (task_id omitted or the dispatcher's HERMES_KANBAN_TASK)
+# so do the tools that hand the card on. Hermes itself refuses a worker's lifecycle call on another
+# card; kanban_comment on another card, kanban_create, kanban_link, kanban_unblock and attachments
+# still go to the approval prompt.
+KANBAN_READ_TOOLS = frozenset({"kanban_show", "kanban_list", "kanban_attachments"})
+KANBAN_OWN_CARD_TOOLS = frozenset({
+    "kanban_complete", "kanban_block", "kanban_request_review", "kanban_request_changes",
+    "kanban_schedule", "kanban_heartbeat", "kanban_comment",
+})
+KANBAN_HINT = (" In a kanban worker nobody can approve it: if the task cannot be done without {tool}, "
+               "call kanban_block with the reason.")
+# A card's output goes in its workspace, the folder the dispatcher gives it (HERMES_KANBAN_WORKSPACE:
+# scratch, a git worktree, or a dir: the user chose). Writing there is handing the work back too, so
+# write_file and patch (one file, replace mode) stay free inside it; anywhere else, they still go to
+# the prompt. Hermes's own write checks (sensitive paths, protected instruction files) still apply.
+KANBAN_WRITE_TOOLS = frozenset({"write_file", "patch"})
+KANBAN_WRITE_HINT = " Files can be written inside this card's workspace, {workspace}, with an absolute path."
+# Reading back: the card's workspace (its own work; patch reads first), and the exact files the
+# parent cards handed on, which Hermes names in the worker's first message (Hermes: "Workers read
+# attachments by absolute path"). Other cards' attachments can hold files a person attached: guarded.
+KANBAN_READ_FILE_TOOLS = frozenset({"read_file", "search_files"})
+KANBAN_READ_HINT = " Readable without approval here: {where}."
+_MSYS_PATH = re.compile(r"^/(?:(?:cygdrive|mnt)/)?([a-zA-Z])(/.*)?$")
 # Reading local files is the first half of "read a secret, then put it in a URL": after web content,
 # read_file and search_files stay free only where Hermes keeps what it fetched (documented:
 # HERMES_HOME/cache/web for web_extract text, cache/spillover for oversized tool results, which
@@ -477,6 +508,8 @@ def _mark_web(session_id: str) -> None:
             _web_sessions.popitem(last=False)
     if new and not session_id.startswith(("task:", UNATTRIBUTED)):
         _save_mark(session_id)
+    if card := _kanban_card():
+        _record_card(*card)
 
 
 def _is_marked(session_id: str) -> bool:
@@ -496,6 +529,219 @@ def _is_marked(session_id: str) -> bool:
         while len(_web_sessions) > MAX_WEB_SESSIONS:
             _web_sessions.popitem(last=False)
     return True
+
+
+# Kanban cards worked by a conversation that read the web. What a worker leaves on its card (summary,
+# block reason, comments, the last output of a failed run) reaches the next worker's first message: a
+# retry of the card ("Prior attempts") and the child cards ("Parent task results"), which Hermes does
+# not wrap as untrusted. So a worker whose card or parent card is recorded starts guarded, as a
+# subagent inherits its parent's mark. Workers are separate processes: one empty file per card (board
+# and card id only) under plugin-data, so concurrent workers never rewrite a shared file.
+KANBAN_DIR = "kanban_cards"
+MAX_KANBAN_CARDS = 2000
+_kanban_cards: set[str] = set()  # this process (and the only record outside Hermes)
+# Hermes builds a worker's first message (hermes_cli/kanban_db_context.py): "## Parent task results"
+# with one "### <card id>" per parent, its summary and a "_metadata_:" line that names the files it
+# handed on (artifacts), and "## Recent work by @<profile>" with one "- <card id> — <title>" line per
+# recent card of the same profile.
+_SECTION = re.compile(r"^## (Parent task results|Recent work by @\S*)\s*$", re.M)
+_CARD_HEADING = re.compile(r"^### (\S+)", re.M)
+_RECENT_LINE = re.compile(r"^- (\S+) — ", re.M)
+_METADATA_LINE = re.compile(r"^_metadata_: `(.*)`\s*$", re.M)
+_handoff_files: set[str] = set()  # files the parent cards handed on (this process works one card)
+
+
+def _kanban_card() -> Optional[tuple[str, str]]:
+    """(board, card id) of the card this process works, from the dispatcher's environment."""
+    task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    return (os.environ.get("HERMES_KANBAN_BOARD", "").strip(), task) if task else None
+
+
+def _on_card(args: Any, task: str) -> bool:
+    """Whether a board call targets the worker's own card: no task_id (Hermes defaults to it) or its id."""
+    named = _args_dict(args).get("task_id")
+    return named is None or str(named).strip() in ("", task)
+
+
+def _safe_name(text: str) -> str:
+    """A file name part: letters, digits, - and . only (no separator, so nothing leaves the folder)."""
+    return "".join(ch if ch.isalnum() or ch in "-." else "_" for ch in str(text))[:100]
+
+
+def _printable(text: Any) -> str:
+    """A path for a prompt: it comes from the model or a card, so no control characters, and short."""
+    return "".join(ch if ch.isprintable() else " " for ch in str(text))[:300]
+
+
+def _kanban_workspace() -> Optional[str]:
+    """The card's workspace folder, from the dispatcher's environment."""
+    return os.environ.get("HERMES_KANBAN_WORKSPACE", "").strip() or None
+
+
+def _native_path(path: str) -> str:
+    """A Git Bash path (/c/Users/x, /cygdrive/c/.., /mnt/c/..) as Windows reads it, the way Hermes's
+    own tools take it on Windows; unchanged elsewhere."""
+    match = _MSYS_PATH.match(path) if os.name == "nt" else None
+    if not match:
+        return path
+    return f"{match.group(1).upper()}:{(match.group(2) or '/').replace('/', os.sep)}"
+
+
+def _in_workspace(tool_name: str, args: Any, workspace: str) -> bool:
+    """Whether a write_file / patch call writes one file inside the card's workspace. A relative path,
+    a multi-file patch (V4A, paths inside its text) or a cross-profile write does not count; links and
+    .. are resolved first, so a path that leaves the folder does not count either."""
+    values = _args_dict(args)
+    if values.get("cross_profile"):
+        return False
+    if tool_name == "patch" and (values.get("patch") or str(values.get("mode") or "replace") != "replace"):
+        return False
+    path = values.get("path")
+    return isinstance(path, str) and bool(path.strip()) and _inside(path.strip(), workspace)
+
+
+def _inside(path: str, folder: str) -> bool:
+    """Whether an absolute path lies inside a folder, after links and .. are resolved."""
+    target = Path(_native_path(path))
+    root = Path(_native_path(folder))
+    if not target.is_absolute() or not root.is_absolute():
+        return False
+    try:
+        real = os.path.normcase(os.path.realpath(target))
+        base = os.path.normcase(os.path.realpath(root))
+    except (OSError, ValueError):
+        return False
+    return real.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _card_key(board: str, task: str) -> str:
+    return f"{_safe_name(board) or '-'}__{_safe_name(task)}"
+
+
+def _cards_dir() -> Optional[Path]:
+    try:
+        from plugins.plugin_storage import plugin_data_dir  # Hermes plugin public API
+        return plugin_data_dir("webgraft") / KANBAN_DIR
+    except Exception:  # noqa: BLE001 - outside Hermes: memory only
+        return None
+
+
+def _record_card(board: str, task: str) -> None:
+    key = _card_key(board, task)
+    with _lock:
+        if key in _kanban_cards:
+            return
+        _kanban_cards.add(key)
+    folder = _cards_dir()
+    if folder is None:
+        return
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / key).touch()
+        files = sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)
+        for old in files[:max(0, len(files) - MAX_KANBAN_CARDS)]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass  # the record still holds in this process
+
+
+def _card_recorded(board: Optional[str], task: str) -> bool:
+    """Whether a card was worked after a web read. board None: any board (a call that names no board)."""
+    task = str(task or "").strip()
+    if not task:
+        return False
+    suffix = "__" + _safe_name(task)
+    with _lock:
+        if (board is None and any(k.endswith(suffix) for k in _kanban_cards)) or \
+                (board is not None and _card_key(board, task) in _kanban_cards):
+            return True
+    folder = _cards_dir()
+    if folder is None:
+        return False
+    try:
+        if board is not None:
+            return (folder / _card_key(board, task)).is_file()
+        return any(p.name.endswith(suffix) for p in folder.iterdir())
+    except OSError:
+        return False
+
+
+def _handoff(text: str) -> tuple[list[str], list[str], bool]:
+    """From a worker's first message: the card ids whose work it shows (parents, recent work), the
+    files the parents handed on, and whether a section could not be read (then it counts as web)."""
+    ids: list[str] = []
+    files: list[str] = []
+    unreadable = False
+    for match in _SECTION.finditer(text):
+        body = re.split(r"^## ", text[match.end():], maxsplit=1, flags=re.M)[0]
+        if match.group(1) == "Parent task results":
+            found = _CARD_HEADING.findall(body)
+            for line in _METADATA_LINE.findall(body):
+                try:
+                    artifacts = json.loads(line).get("artifacts") or []
+                except (ValueError, AttributeError):
+                    continue  # cut by Hermes's size cap: its files stay guarded
+                files.extend(a for a in artifacts if isinstance(a, str))
+        else:
+            found = _RECENT_LINE.findall(body)
+        unreadable = unreadable or not found
+        ids.extend(found)
+    return ids, files, unreadable
+
+
+def _inherits_web(card: tuple[str, str], user_message: Any) -> bool:
+    """Whether a worker's first message carries what a web-reading conversation left: its own card
+    (an earlier run), a parent card, or a recent card of the same profile. Also notes the files the
+    parent cards handed on, which the worker may read."""
+    board, task = card
+    ids, files, unreadable = _handoff(_text_of(user_message))
+    if files:
+        with _lock:
+            _handoff_files.update(files)
+    return unreadable or _card_recorded(board, task) or any(_card_recorded(board, i) for i in ids)
+
+
+def _same_file(path: str, other: str) -> bool:
+    try:
+        return os.path.normcase(os.path.realpath(_native_path(path))) == \
+            os.path.normcase(os.path.realpath(_native_path(other)))
+    except (OSError, ValueError):
+        return False
+
+
+def _kanban_read_free(tool_name: str, args: Any, workspace: Optional[str]) -> bool:
+    """A worker's read_file / search_files in its card's workspace, or read_file of a file a parent
+    card handed on (named by Hermes in the worker's first message)."""
+    values = _args_dict(args)
+    path = values.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return False
+    if workspace and (_inside(path.strip(), workspace) or
+                      (tool_name == "search_files" and _same_file(path.strip(), workspace))):
+        return True  # a search may name the workspace folder itself
+    with _lock:
+        handed = list(_handoff_files)
+    return tool_name == "read_file" and any(_same_file(path.strip(), f) for f in handed)
+
+
+def _shown_cards(result: Any) -> list[str]:
+    """Card ids in a kanban_show / kanban_list result: each card's id and its parents."""
+    ids: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("id", "task_id") and isinstance(value, str):
+                    ids.append(value)
+                elif key in ("parents", "unsatisfied_parents") and isinstance(value, list):
+                    ids.extend(v for v in value if isinstance(v, str))
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+    walk(_json(result))
+    return ids
 
 
 def _web_in_history(history: Any) -> bool:
@@ -551,25 +797,45 @@ def _fetched_folder(tool_name: str, args: Any) -> bool:
 
 
 def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[dict]:
-    if tool_name in READ_ONLY_TOOLS:
+    if tool_name in READ_ONLY_TOOLS or tool_name in KANBAN_READ_TOOLS:
         return None
     mode = guard_mode()
     if mode == "off":
         return None
     if not _is_marked(session_id):
         return None
+    card = _kanban_card()
+    if card and tool_name in KANBAN_OWN_CARD_TOOLS and _on_card(args, card[1]):
+        _record_card(*card)  # what the worker leaves on its card carries what it read
+        return None
     if tool_name in MEDIA_TOOLS and _media_source(tool_name, args) != "file":
         return None  # a URL is a web read, free like web_extract; data: is inline, no read
     if tool_name in PATH_READ_TOOLS and _fetched_folder(tool_name, args):
         return None
+    workspace = _kanban_workspace() if card else None
+    if workspace and tool_name in KANBAN_WRITE_TOOLS and _in_workspace(tool_name, args, workspace):
+        return None  # the card's output, in the folder the dispatcher gave it
+    if card and tool_name in KANBAN_READ_FILE_TOOLS and _kanban_read_free(tool_name, args, workspace):
+        return None  # the card's own work, or what its parents handed on
+    hint = KANBAN_HINT.format(tool=tool_name or "this tool") if card else ""
+    if workspace and tool_name in KANBAN_WRITE_TOOLS:
+        hint = KANBAN_WRITE_HINT.format(workspace=_printable(workspace)) + hint
+    if card and tool_name in KANBAN_READ_FILE_TOOLS:
+        with _lock:
+            handed = sorted(_handoff_files)[:10]
+        where = [f"this card's workspace, {_printable(workspace)}"] if workspace else []
+        if handed:
+            where.append("the files the parent cards handed on: " + ", ".join(_printable(f) for f in handed))
+        if where:
+            hint = KANBAN_READ_HINT.format(where="; ".join(where)) + hint
     if mode == "block":
-        return {"action": "block", "message": GUARD_BLOCK}
+        return {"action": "block", "message": GUARD_BLOCK + hint}
     what = tool_name or "this tool"
     if tool_name in PATH_READ_TOOLS:
         # The path comes from the model, maybe from a page: no control characters in the prompt.
         path = "".join(ch if ch.isprintable() else " " for ch in (_read_path(tool_name, args) or "the current folder"))[:300]
         what = f"{tool_name} on {path}"
-    return {"action": "approve", "message": GUARD_ASK.format(tool=what),
+    return {"action": "approve", "message": GUARD_ASK.format(tool=what) + hint,
             "rule_key": f"webgraft:tool_guard:{tool_name}"}
 
 
@@ -785,6 +1051,11 @@ def _record_tool(tool_name: str = "", result: Any = None, session_id: str = "", 
             start = _delegations.pop(_call_key(conversation, tool_call_id), None)
             subagent_read_web = start is None or _web_reads > start
         if subagent_read_web:  # unknown start (another process, a lost record) counts as read
+            _mark_web(conversation)
+    elif tool_name in KANBAN_READ_TOOLS:
+        # A card worked after a web read (or its parent's) carries what was read into this conversation.
+        board = (_kanban_card() or (None, ""))[0] if not _args_dict(args).get("board") else str(_args_dict(args)["board"])
+        if any(_card_recorded(board, card_id) for card_id in _shown_cards(result)):
             _mark_web(conversation)
     if tool_name not in ("web_search", "web_extract"):
         return
