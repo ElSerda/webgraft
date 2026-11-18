@@ -1,6 +1,7 @@
 """tool_guard: once web content is in a conversation, tools with effects go to Hermes's approval gate."""
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1163,3 +1164,38 @@ def test_a_relative_multi_file_patch_is_not_pinned(workspace):
     read_a_page(ctx, session="w1")
     out = pre(ctx, "patch", session="w1", args={"mode": "patch", "path": "route.md", "patch": "*** Add File: /tmp/x"})
     assert out["action"] == "approve"
+
+
+# ---------------------------------------------------------------- a relative read in a worker
+# The same for reading back: Hermes resolves a relative read_file / search_files path (search_files: "." by default)
+# against the terminal's current folder. Seen live (2026-11-18, board kb-proof): after writing nous-latest-model.md
+# by a relative path, the writer's read_file("nous-latest-model.md") went to the prompt; the model retried with the
+# absolute path. webgraft pins such a path to the card's workspace.
+
+
+@pytest.mark.parametrize("tool, name", [("read_file", "route.md"), ("read_file", "guides/levels/route.md"),
+                                        ("search_files", "guides"), ("search_files", ".")])
+def test_a_relative_read_in_a_worker_is_read_in_its_workspace(workspace, tool, name):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    out = pre(ctx, tool, session="w1", args={"path": name, "pattern": "x"})
+    assert out == {"action": "modify", "args": {"path": os.path.normpath(str(workspace / name))}}
+
+
+def test_a_search_with_no_path_searches_the_workspace(workspace):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    out = pre(ctx, "search_files", session="w1", args={"pattern": "Arete"})
+    assert out == {"action": "modify", "args": {"path": str(workspace)}}
+
+
+@pytest.mark.parametrize("name", ["../t_other/x.md", "~/x.md", "/x.md", ".."])
+def test_a_relative_read_that_leaves_the_workspace_still_goes_to_the_prompt(workspace, name):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    assert pre(ctx, "read_file", session="w1", args={"path": name})["action"] == "approve"
+
+
+def test_a_relative_read_is_left_to_hermes_before_any_web_content(workspace):
+    ctx = setup()
+    assert pre(ctx, "read_file", session="w1", args={"path": "route.md"}) is None

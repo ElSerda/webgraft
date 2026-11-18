@@ -635,16 +635,28 @@ def _in_workspace(tool_name: str, args: Any, workspace: str) -> bool:
     return bool(path) and _inside(path, workspace)
 
 
-def _pinned_write(tool_name: str, args: Any, workspace: str) -> Optional[str]:
-    """A relative write_file / patch path, as the absolute path in the card's workspace. Hermes resolves a
-    relative path against the terminal's current folder, which a cd can move: pinned (pre_tool_call
-    modify), the file lands where webgraft checked. None for an absolute, rooted, drive or ~ path, and for
-    one that leaves the workspace."""
-    path = _one_file_path(tool_name, args)
+def _in_workspace_relative(path: str, workspace: str, folder: bool = False) -> Optional[str]:
+    """A relative path, as the absolute path in the card's workspace. Hermes resolves a relative path
+    against the terminal's current folder, which a cd can move: pinned (pre_tool_call modify), the tool
+    works where webgraft checked. None for an absolute, rooted, drive or ~ path, and for one that leaves
+    the workspace; the workspace folder itself only when `folder` (a search)."""
     if not path or path.startswith("~") or Path(path).drive or Path(path).root:
         return None
     target = os.path.normpath(os.path.join(_native_path(workspace), path))
-    return target if _inside(target, workspace) else None
+    return target if _inside(target, workspace) or (folder and _same_file(target, workspace)) else None
+
+
+def _pinned_write(tool_name: str, args: Any, workspace: str) -> Optional[str]:
+    """A relative write_file / patch path (one file), pinned to the card's workspace."""
+    return _in_workspace_relative(_one_file_path(tool_name, args), workspace)
+
+
+def _pinned_read(tool_name: str, args: Any, workspace: str) -> Optional[str]:
+    """A relative read_file / search_files path, pinned to the card's workspace. search_files searches
+    "." (Hermes's default, the current folder) when it names no path."""
+    path = _args_dict(args).get("path", "." if tool_name == "search_files" else "")
+    path = path.strip() if isinstance(path, str) else ""
+    return _in_workspace_relative(path, workspace, folder=tool_name == "search_files")
 
 
 def _within(path: str, folder: str) -> bool:
@@ -960,6 +972,8 @@ def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[d
         return {"action": "modify", "args": {"path": pinned}}  # the same, named relative to the workspace
     if card and tool_name in KANBAN_READ_FILE_TOOLS and _kanban_read_free(tool_name, args, workspace):
         return None  # the card's own work, or what its parents handed on
+    if workspace and tool_name in KANBAN_READ_FILE_TOOLS and (pinned := _pinned_read(tool_name, args, workspace)):
+        return {"action": "modify", "args": {"path": pinned}}  # the same, named relative to the workspace
     if workspace and tool_name == "terminal" and (pinned := _terminal_workdir(args, workspace)):
         return {"action": "modify", "args": {"workdir": pinned}}  # Hermes's own checks still run on it
     hint = KANBAN_HINT.format(tool=tool_name or "this tool") if card else ""
