@@ -375,6 +375,34 @@ KANBAN_WRITE_HINT = " Files can be written inside this card's workspace, {worksp
 KANBAN_READ_FILE_TOOLS = frozenset({"read_file", "search_files"})
 KANBAN_READ_HINT = " Readable without approval here: {where}."
 _MSYS_PATH = re.compile(r"^/(?:(?:cygdrive|mnt)/)?([a-zA-Z])(/.*)?$")
+# The terminal in the card's workspace. Hermes judges what a command does (hardline and dangerous
+# patterns, refused where nobody can answer), not where it acts: in a kanban worker it let a command
+# write outside the workspace (seen live 2026-11-18, tool_guard off). webgraft adds the "where": a
+# command stays free when everything it names stays in the workspace, and Hermes's own checks run on
+# it as usual. The terminal keeps its folder between calls, so webgraft pins workdir for the command
+# (pre_tool_call modify) to the folder it checked. Anything it cannot read as such is refused:
+# - programs: file and text utilities only, and other programs with a version flag alone; a script
+#   run (python x.py, ./x.sh), inline code (python -c), sed, awk, xargs, env, git, a network tool or
+#   any other program is not free;
+# - no URL, no $ or ` expansion, no %VAR%, no heredoc, no ( ) { } group, no VAR=value prefix;
+# - every other word counts as a path and must stay in the workspace (.. and links resolved), so
+#   cp x ../elsewhere, cat C:/... or > D:/... are not free; ~ is refused.
+TERMINAL_FILE_PROGRAMS = frozenset({
+    "ls", "dir", "pwd", "cd", "echo", "printf", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr",
+    "grep", "egrep", "fgrep", "diff", "cmp", "comm", "mkdir", "touch", "cp", "mv", "rm", "rmdir", "tee",
+    "basename", "dirname", "realpath", "stat", "file", "du", "tree", "date", "true", "false", "test",
+    "nl", "fold", "fmt", "paste", "column", "md5sum", "sha1sum", "sha256sum", "find",
+})
+TERMINAL_VERSION_FLAGS = frozenset({"--version", "-V", "-v", "version"})
+FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
+_SEGMENT_OPS = frozenset({";", "&&", "||", "|", "&"})
+_REDIRECT_OPS = frozenset({">", ">>", "<", ">|", "&>", ">&"})
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+TERMINAL_HINT = (" In this kanban worker, a terminal command runs without approval when it stays in this "
+                 "card's workspace, {workspace}: file and text commands (ls, cat, cp, mv, mkdir, grep...) on "
+                 "paths inside it, or a program with --version alone; no URL, no $ or ` expansion, no "
+                 "heredoc, no script run. To write or read files, write_file, read_file and search_files "
+                 "work there too.")
 # Reading local files is the first half of "read a secret, then put it in a URL": after web content,
 # read_file and search_files stay free only where Hermes keeps what it fetched (documented:
 # HERMES_HOME/cache/web for web_extract text, cache/spillover for oversized tool results, which
@@ -600,6 +628,100 @@ def _in_workspace(tool_name: str, args: Any, workspace: str) -> bool:
     return isinstance(path, str) and bool(path.strip()) and _inside(path.strip(), workspace)
 
 
+def _within(path: str, folder: str) -> bool:
+    """The folder itself or a path inside it."""
+    return _inside(path, folder) or _same_file(path, folder)
+
+
+def _word(token: str) -> str:
+    """A shell word without its surrounding quotes."""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+        return token[1:-1]
+    return token
+
+
+def _terminal_workdir(args: Any, workspace: str) -> Optional[str]:
+    """The folder a terminal command would run in, when it stays in the workspace: its workdir, else the
+    workspace (Hermes points the worker's terminal there); None when the command does not stay there."""
+    import shlex
+
+    values = _args_dict(args)
+    command = values.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    workdir = values.get("workdir")
+    base = workspace
+    if isinstance(workdir, str) and workdir.strip():
+        if not _within(workdir.strip(), workspace):
+            return None
+        base = workdir.strip()
+    if any(mark in command for mark in ("$", "`", "<<", "%", "\x00")) or _URL.search(command):
+        return None
+    lexer = shlex.shlex(command.replace("\r", " ").replace("\n", " ; "), posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:  # an unclosed quote
+        return None
+    segment: list[str] = []
+    folder = base
+    for token in tokens + [";"]:
+        if token in _SEGMENT_OPS:
+            folder = _segment_in(segment, folder, workspace)
+            if folder is None:
+                return None
+            segment = []
+        elif token in _REDIRECT_OPS:
+            continue  # its target is the next word, checked as a path
+        elif set(token) & set("(){}") or (token and token[0] in "<>&|;"):
+            return None  # a group, a subshell or an operator webgraft does not read
+        else:
+            segment.append(token)
+    return base
+
+
+def _segment_in(words: list[str], folder: str, workspace: str) -> Optional[str]:
+    """Check one simple command; return the folder the next one starts in (cd), or None."""
+    if not words:
+        return folder
+    program = _word(words[0]).lower().removesuffix(".exe")
+    rest = [_word(w) for w in words[1:]]
+    if "=" in program or "/" in program or "\\" in program:
+        return None  # VAR=value prefix, or a program run by path (a script)
+    if program not in TERMINAL_FILE_PROGRAMS:
+        return folder if len(rest) == 1 and rest[0] in TERMINAL_VERSION_FLAGS else None
+    if program == "find" and any(word in FIND_ACTIONS for word in rest):
+        return None
+    if program == "cd":
+        if len(rest) != 1:
+            return None
+        target = _path_in(rest[0], folder, workspace)
+        return target
+    for word in rest:
+        if word.startswith("-"):
+            name, _, value = word.partition("=")
+            if value and _path_in(value, folder, workspace) is None:
+                return None
+            if not value and set(name) & set("/\\:"):
+                return None
+        elif _path_in(word, folder, workspace) is None:
+            return None
+    return folder
+
+
+def _path_in(word: str, folder: str, workspace: str) -> Optional[str]:
+    """The absolute path a command word names, when it stays in the workspace; None otherwise."""
+    if word in ("/dev/null", "NUL", "nul"):
+        return folder  # the shell's discard device
+    if not word or word.startswith("~"):
+        return None
+    native = _native_path(word)
+    if os.name == "nt" and native.startswith(("/", "\\")) and not re.match(r"^[A-Za-z]:", native):
+        return None  # Git Bash reads /etc, /usr... in its own install folder: outside the workspace
+    path = native if Path(native).is_absolute() else os.path.join(folder, native)
+    return path if _within(path, workspace) else None
+
+
 def _inside(path: str, folder: str) -> bool:
     """Whether an absolute path lies inside a folder, after links and .. are resolved."""
     target = Path(_native_path(path))
@@ -817,7 +939,11 @@ def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[d
         return None  # the card's output, in the folder the dispatcher gave it
     if card and tool_name in KANBAN_READ_FILE_TOOLS and _kanban_read_free(tool_name, args, workspace):
         return None  # the card's own work, or what its parents handed on
+    if workspace and tool_name == "terminal" and (pinned := _terminal_workdir(args, workspace)):
+        return {"action": "modify", "args": {"workdir": pinned}}  # Hermes's own checks still run on it
     hint = KANBAN_HINT.format(tool=tool_name or "this tool") if card else ""
+    if workspace and tool_name in ("terminal", "execute_code", "process_manage"):
+        hint = TERMINAL_HINT.format(workspace=_printable(workspace)) + hint
     if workspace and tool_name in KANBAN_WRITE_TOOLS:
         hint = KANBAN_WRITE_HINT.format(workspace=_printable(workspace)) + hint
     if card and tool_name in KANBAN_READ_FILE_TOOLS:

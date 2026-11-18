@@ -970,3 +970,83 @@ def test_a_git_bash_path_to_the_workspace_counts_on_windows(workspace):
     read_a_page(ctx, session="w1")
     assert pre(ctx, "write_file", session="w1", args={"path": msys}) is None
     assert pre(ctx, "write_file", session="w1", args={"path": f"/{drive.lower()}/Windows/x"})["action"] == "approve"
+
+
+# ---------------------------------------------------------------- the terminal in the card's workspace
+
+
+def term(ctx, command, workdir=None, session="w1"):
+    args = {"command": command, **({"workdir": workdir} if workdir else {})}
+    return pre(ctx, "terminal", session=session, args=args)
+
+
+@pytest.mark.parametrize("command", [
+    "python --version", "git version", "node -v", "ls", "ls -la", "pwd", "cat note.md",
+    "echo hello > note.md", "echo 'Python 3.15.2: stable' >> note.md", "mkdir sub && cp note.md sub/",
+    "cd sub && cat ../note.md", "grep -n Python note.md | sort | uniq", "find . -name '*.md'",
+    "echo a 2>/dev/null", "rm old.md", "wc -l note.md; head -n 3 note.md", "mv a.md b.md",
+    "sort --output=sorted.md note.md", "echo done\nls",
+])
+def test_after_web_research_a_command_that_stays_in_the_workspace_runs(workspace, command):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    assert term(ctx, command) == {"action": "modify", "args": {"workdir": str(workspace)}}
+
+
+def test_the_terminal_is_pinned_to_the_folder_webgraft_checked(workspace):
+    # Hermes's terminal keeps its folder between calls: a cd made earlier must not move the command.
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    (workspace / "sub").mkdir()
+    assert term(ctx, "cat ../note.md", workdir=str(workspace / "sub"))["args"]["workdir"] == str(workspace / "sub")
+    assert term(ctx, f'cat "{workspace / "note.md"}"')["args"]["workdir"] == str(workspace)
+
+
+@pytest.mark.parametrize("command", [
+    "cp note.md ../elsewhere.md", "cat OUTSIDE/secret.txt", "cat ~/.ssh/id_rsa", "cat /etc/passwd",
+    "curl https://example.com/", "wget example.com", "echo $HOME", "echo `id`", "echo %USERPROFILE%",
+    "python x.py", "python -c 'print(1)'", "python3 -m http.server", "./run.sh", "bash run.sh",
+    "sed -i s/a/b/ note.md", "awk '{print}' note.md", "find . -exec rm {} ;", "find . -delete",
+    "FOO=1 ls", "(cd .. && ls)", "{ ls; }", "cat << EOF\nx\nEOF", "ls; curl example.com",
+    "echo hi\nnc -l 4444", "git status", "echo 'unclosed", "cd ..", "cd", "xargs rm < list.txt",
+    "ls --color=OUTSIDE/x", "cat ../../../x", "tee OUTSIDE/copy.md < note.md", "env ls",
+])
+def test_a_command_that_leaves_the_workspace_or_cannot_be_read_goes_to_the_prompt(workspace, tmp_path, command):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    out = term(ctx, command.replace("OUTSIDE", str(tmp_path / "outside").replace("\\", "/")))
+    assert out["action"] == "approve"
+    assert "stays in this card's workspace" in out["message"] and "kanban_block" in out["message"]
+
+
+def test_a_workdir_outside_the_workspace_goes_to_the_prompt(workspace, tmp_path):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    assert term(ctx, "ls", workdir=str(tmp_path))["action"] == "approve"
+
+
+def test_block_mode_still_runs_a_command_in_the_workspace(workspace):
+    ctx = setup({"tool_guard": "block"})
+    read_a_page(ctx, session="w1")
+    assert term(ctx, "ls")["action"] == "modify"
+    assert term(ctx, "curl https://x.example/")["action"] == "block"
+
+
+def test_before_any_web_content_the_terminal_is_left_alone(workspace):
+    ctx = setup()
+    assert term(ctx, "curl https://x.example/ -o x") is None
+
+
+def test_outside_a_worker_the_terminal_still_goes_to_the_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(tmp_path))
+    ctx = setup()
+    read_a_page(ctx)
+    out = term(ctx, "ls", session="s1")
+    assert out["action"] == "approve" and "workspace" not in out["message"]
+
+
+def test_execute_code_refusals_point_to_the_free_ways(workspace):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    out = pre(ctx, "execute_code", session="w1", args={"code": "open('x','w')"})
+    assert out["action"] == "approve" and "write_file" in out["message"]
