@@ -80,6 +80,7 @@ webgraft fixes the first two, pushes against the third, and shows which pages th
 
 4. **With Crawl4AI installed**, a page the site served (status 200, no bot wall) where trafilatura found no text, or almost none (under 300 characters), is opened in a headless browser (the Chromium Hermes installs), with the same `HermesAgent` User-Agent.
    - These are pages built by scripts (Vue, React...): the browser waits for the page to load, then one more second for its scripts to fetch their data, and its view is read instead.
+   - When the browser brings nothing back for such a page (its 60-second limit, an error, an HTTP error, another site at the end), the page is reported as not read, with the reason, instead of returning its placeholder ("loading...", a "JavaScript required" notice). Seen live: a page came back as "loading..." after the browser's timeout. Without Crawl4AI, or without Hermes's Chromium recorded, the downloaded text is returned as before.
    - With `browser: always`, every page the site served is also opened, and the browser's rendered HTML is read the same way, for the values its scripts filled in. It costs about 4 seconds per page. Measured on 12 pages that have text (product pages, specs, docs, an issue), the download already held what the browser added on all but one, where the browser added a comparison widget filled in by scripts.
    - The browser only completes what the site served. A page the site refused (403, 429...) or a bot wall is never re-read in the browser: that would be getting past the site's answer.
 

@@ -799,6 +799,24 @@ async def _download(client, url: str):
         return response, b"".join(chunks), size > limit
 
 
+SCRIPT_PAGE_UNREAD = "the page is built by scripts and the browser could not render it"
+# The browser is not set up here: a page with little text is returned as downloaded, as without
+# Crawl4AI (README, "skip Crawl4AI in setup").
+BROWSER_ABSENT = ("crawl4ai not installed", "no Chromium recorded")
+
+
+def browser_missed(view: dict, view_ok: bool) -> str:
+    """Why the browser brought back no text for a page it opened; "" when there is no browser here
+    or when it rendered the page (then its text, even short, is the page)."""
+    if view.get("success"):
+        if view_ok:
+            return ""
+        status = int(view.get("status") or 200)
+        return f"the browser got HTTP {status}" if status >= 400 else "the browser ended on another site"
+    error = str(view.get("error") or "the browser failed")
+    return "" if error.startswith(BROWSER_ABSENT) else error
+
+
 def _origin(status: int, reason: str) -> str:
     """A page-level failure. Hermes's `HTTP <code> from origin: ...` form only when the site really
     answered 400 or more, as Hermes's own backends write it; otherwise the reason alone. What
@@ -917,7 +935,8 @@ async def _read_page_itself(client, url: str) -> Page:
     # completes a page the site gave (pages built by scripts; with browser: always, also the values
     # scripts fill in on a page that has text).
     wanted = browser_mode() == "always" or thin(main)
-    view = await browser_view(final) if wanted and not is_document(final, ctype, b"") else {"success": False}
+    opened = wanted and not is_document(final, ctype, b"")
+    view = await browser_view(final) if opened else {"success": False}
     view_ok = view.get("success") and int(view.get("status") or 200) < 400
     if view_ok and not same_site(final, str(view.get("final_url") or "")):
         # The browser ended on another site than the page downloaded: its text is not this page's,
@@ -932,6 +951,11 @@ async def _read_page_itself(client, url: str) -> Page:
         browser_md, blocked = "", reason  # the browser met a wall: its view is dropped
     # Off the event loop: on a large page these take a moment, and Hermes's other work must go on.
     view_html = str(view.get("html") or "") if view_ok and not blocked else ""
+    if opened and thin(main) and not browser_md and (missed := blocked or browser_missed(view, view_ok)):
+        # Scripts build this page and the browser brought nothing back: what the download holds is a
+        # placeholder ("loading...", a JavaScript notice), not the page. Seen live: a 60 s timeout
+        # left "loading..." returned as read. It is a page not read here, like any other.
+        return Page(url, title or view_title, error=_origin(status, blocked or f"{SCRIPT_PAGE_UNREAD}: {missed}"))
     content, engine = await asyncio.to_thread(merge, main, browser_md, html, view_html)
     title = title or view_title
     if not content.strip():

@@ -5,6 +5,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _pkg import load  # noqa: E402
@@ -280,6 +282,57 @@ def test_a_page_whose_only_text_is_its_noscript_notice_is_opened_in_the_browser(
              "this app.</noscript><div id='root'></div></body></html>")
     page, calls = _read_with_browser(monkeypatch, shell)
     assert calls == ["https://site.example/specs"] and "2617 MHz" in page.content
+
+
+LOADING_SHELL = "<html><head><title>Nous DisTrO</title></head><body><div id='app'>loading...</div></body></html>"
+
+
+@pytest.mark.parametrize("view, why", [
+    ({"success": False, "error": "browser timed out after 60s"}, "browser timed out after 60s"),
+    ({"success": False, "error": "the page's address is not public now: no browser"}, "not public now"),
+    ({"success": True, "status": 503, "markdown": "x", "final_url": "https://site.example/specs"}, "HTTP 503"),
+    ({"success": True, "status": 200, "markdown": "x", "final_url": "https://elsewhere.example/"}, "another site"),
+])
+def test_a_script_page_the_browser_could_not_render_is_not_returned_as_read(monkeypatch, view, why):
+    # Live 2026-11-18: distro.nousresearch.com came back as "loading..." after the browser's 60 s
+    # timeout, with no error; wowhead pages as their "JavaScript required" notice.
+    async def download(client, url):
+        return Response(url, body=LOADING_SHELL), LOADING_SHELL.encode("utf-8"), False
+
+    async def failed(url):
+        return dict(view)
+    monkeypatch.setattr(ex, "_download", download)
+    monkeypatch.setattr(ex, "browser_view", failed)
+    page = asyncio.run(ex._read_page_itself(None, "https://site.example/specs"))
+    assert not page.content and page.error.startswith(ex.SCRIPT_PAGE_UNREAD) and why in page.error
+    assert not page.error.startswith("HTTP ")  # the site served it: not an answer from the origin
+
+
+@pytest.mark.parametrize("error", ["crawl4ai not installed", "no Chromium recorded: run `hermes webgraft setup`"])
+def test_without_a_browser_here_a_short_page_is_returned_as_downloaded(monkeypatch, error):
+    async def download(client, url):
+        return Response(url, body=LOADING_SHELL), LOADING_SHELL.encode("utf-8"), False
+
+    async def absent(url):
+        return {"success": False, "error": error}
+    monkeypatch.setattr(ex, "_download", download)
+    monkeypatch.setattr(ex, "browser_view", absent)
+    page = asyncio.run(ex._read_page_itself(None, "https://site.example/specs"))
+    assert not page.error and "loading" in page.content
+
+
+def test_a_short_page_the_browser_rendered_keeps_its_text(monkeypatch):
+    short = "<html><head><title>Example Domain</title></head><body><h1>Example Domain</h1><p>For use in examples.</p></body></html>"
+
+    async def download(client, url):
+        return Response(url, body=short), short.encode("utf-8"), False
+
+    async def rendered(url):
+        return {"success": True, "status": 200, "markdown": "", "final_url": url}
+    monkeypatch.setattr(ex, "_download", download)
+    monkeypatch.setattr(ex, "browser_view", rendered)
+    page = asyncio.run(ex._read_page_itself(None, "https://site.example/specs"))
+    assert not page.error and "Example Domain" in page.content
 
 
 def test_browser_always_opens_a_page_with_text(monkeypatch):
