@@ -807,9 +807,10 @@ def test_a_child_of_a_web_card_can_still_write_the_final_file(workspace, worker)
     assert pre(ctx, "terminal", session="child-run")["action"] == "approve"
 
 
-@pytest.mark.parametrize("where", ["outside", "relative", "climbs", "similar", "folder"])
+@pytest.mark.parametrize("where", ["outside", "relative climbs", "home", "rooted", "climbs", "similar", "folder"])
 def test_writes_outside_the_workspace_still_go_to_the_prompt(workspace, tmp_path, where):
-    path = {"outside": str(tmp_path / "elsewhere" / "x.md"), "relative": "route.md",
+    path = {"outside": str(tmp_path / "elsewhere" / "x.md"), "relative climbs": "../t_other/x.md",
+            "home": "~/x.md", "rooted": "/x.md",
             "climbs": str(workspace / ".." / "t_other" / "x.md"),
             "similar": str(workspace) + "-evil" + "/x.md", "folder": str(workspace)}[where]
     ctx = setup()
@@ -1128,3 +1129,37 @@ def test_without_hermes_resolver_the_wrapper_is_still_guarded(monkeypatch):
     read_a_page(ctx)
     out = pre(ctx, "tool_call", args={})
     assert out["action"] == "approve" and out["rule_key"] == "webgraft:tool_guard:tool_call"
+
+
+# ---------------------------------------------------------------- a relative path in a worker
+# Hermes resolves a relative write_file / patch path against the terminal's current folder, which a cd can move.
+# Seen live (2026-11-18, Gemma 4 E4B): the writer card called write_file("gemma4-lmstudio-guide.md"), was sent to
+# the prompt nobody answers in a worker, and blocked its card. webgraft pins such a path to the card's workspace.
+
+
+@pytest.mark.parametrize("name", ["route.md", "guides/levels/route.md", "./route.md"])
+@pytest.mark.parametrize("tool, extra", [("write_file", {"content": "# Route"}),
+                                         ("patch", {"old_string": "a", "new_string": "b"})])
+def test_a_relative_path_in_a_worker_is_written_in_its_workspace(workspace, tool, extra, name):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    out = pre(ctx, tool, session="w1", args={"path": name, **extra})
+    assert out == {"action": "modify", "args": {"path": str(workspace / Path(name))}}
+
+
+def test_block_mode_pins_a_relative_path_too(workspace):
+    ctx = setup({"tool_guard": "block"})
+    read_a_page(ctx, session="w1")
+    assert pre(ctx, "write_file", session="w1", args={"path": "route.md", "content": "x"})["action"] == "modify"
+
+
+def test_a_relative_path_is_left_to_hermes_before_any_web_content(workspace):
+    ctx = setup()
+    assert pre(ctx, "write_file", session="w1", args={"path": "route.md", "content": "x"}) is None
+
+
+def test_a_relative_multi_file_patch_is_not_pinned(workspace):
+    ctx = setup()
+    read_a_page(ctx, session="w1")
+    out = pre(ctx, "patch", session="w1", args={"mode": "patch", "path": "route.md", "patch": "*** Add File: /tmp/x"})
+    assert out["action"] == "approve"

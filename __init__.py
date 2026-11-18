@@ -368,7 +368,8 @@ KANBAN_HINT = (" In a kanban worker nobody can approve it: if the task cannot be
 # write_file and patch (one file, replace mode) stay free inside it; anywhere else, they still go to
 # the prompt. Hermes's own write checks (sensitive paths, protected instruction files) still apply.
 KANBAN_WRITE_TOOLS = frozenset({"write_file", "patch"})
-KANBAN_WRITE_HINT = " Files can be written inside this card's workspace, {workspace}, with an absolute path."
+KANBAN_WRITE_HINT = (" Files can be written inside this card's workspace, {workspace}: an absolute path inside it, or a "
+                     "path relative to it.")
 # Reading back: the card's workspace (its own work; patch reads first), and the exact files the
 # parent cards handed on, which Hermes names in the worker's first message (Hermes: "Workers read
 # attachments by absolute path"). Other cards' attachments can hold files a person attached: guarded.
@@ -615,17 +616,35 @@ def _native_path(path: str) -> str:
     return f"{match.group(1).upper()}:{(match.group(2) or '/').replace('/', os.sep)}"
 
 
-def _in_workspace(tool_name: str, args: Any, workspace: str) -> bool:
-    """Whether a write_file / patch call writes one file inside the card's workspace. A relative path,
-    a multi-file patch (V4A, paths inside its text) or a cross-profile write does not count; links and
-    .. are resolved first, so a path that leaves the folder does not count either."""
+def _one_file_path(tool_name: str, args: Any) -> str:
+    """The path a write_file / patch call writes, when it writes one file of this profile; "" for a
+    multi-file patch (V4A, paths inside its text), a cross-profile write or no path."""
     values = _args_dict(args)
     if values.get("cross_profile"):
-        return False
+        return ""
     if tool_name == "patch" and (values.get("patch") or str(values.get("mode") or "replace") != "replace"):
-        return False
+        return ""
     path = values.get("path")
-    return isinstance(path, str) and bool(path.strip()) and _inside(path.strip(), workspace)
+    return path.strip() if isinstance(path, str) else ""
+
+
+def _in_workspace(tool_name: str, args: Any, workspace: str) -> bool:
+    """Whether a write_file / patch call writes one file inside the card's workspace, by absolute path;
+    links and .. are resolved first, so a path that leaves the folder does not count."""
+    path = _one_file_path(tool_name, args)
+    return bool(path) and _inside(path, workspace)
+
+
+def _pinned_write(tool_name: str, args: Any, workspace: str) -> Optional[str]:
+    """A relative write_file / patch path, as the absolute path in the card's workspace. Hermes resolves a
+    relative path against the terminal's current folder, which a cd can move: pinned (pre_tool_call
+    modify), the file lands where webgraft checked. None for an absolute, rooted, drive or ~ path, and for
+    one that leaves the workspace."""
+    path = _one_file_path(tool_name, args)
+    if not path or path.startswith("~") or Path(path).drive or Path(path).root:
+        return None
+    target = os.path.normpath(os.path.join(_native_path(workspace), path))
+    return target if _inside(target, workspace) else None
 
 
 def _within(path: str, folder: str) -> bool:
@@ -937,6 +956,8 @@ def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[d
     workspace = _kanban_workspace() if card else None
     if workspace and tool_name in KANBAN_WRITE_TOOLS and _in_workspace(tool_name, args, workspace):
         return None  # the card's output, in the folder the dispatcher gave it
+    if workspace and tool_name in KANBAN_WRITE_TOOLS and (pinned := _pinned_write(tool_name, args, workspace)):
+        return {"action": "modify", "args": {"path": pinned}}  # the same, named relative to the workspace
     if card and tool_name in KANBAN_READ_FILE_TOOLS and _kanban_read_free(tool_name, args, workspace):
         return None  # the card's own work, or what its parents handed on
     if workspace and tool_name == "terminal" and (pinned := _terminal_workdir(args, workspace)):
