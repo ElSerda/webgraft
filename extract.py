@@ -1016,6 +1016,19 @@ def note_refused_url(url: str, why: str) -> None:
             _refused.popitem(last=False)
 
 
+def _note_read(page: Page, requested: str) -> None:
+    """A page webgraft just read itself was not served by Hermes's keyless rescue: clear any
+    earlier refusal note. Without this, a site that recovers within the refusal window is read
+    here, yet the footer labels it « read by an outside service » — a false provenance, worst
+    with web.keyless_rescue: false where no rescue exists at all."""
+    if page.error:
+        return
+    with _refused_lock:
+        for url in {requested, page.url}:
+            if url:
+                _refused.pop(_url_key(url), None)
+
+
 def refused_here(url: str) -> str:
     """Why webgraft could not read this page in the last few minutes, or an empty string."""
     with _refused_lock:
@@ -1034,6 +1047,8 @@ async def read_pages(urls: list[str]) -> list[Page]:
     for url, page in zip(urls, pages):
         if page.error:
             _note_refused(page, url)
+        else:
+            _note_read(page, url)
     return pages
 
 

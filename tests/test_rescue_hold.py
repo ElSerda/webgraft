@@ -115,6 +115,36 @@ def test_the_provider_keeps_request_order_with_an_approved_entry(monkeypatch, wh
         assert results[2]["error"] == CERT and not results[2].get("blocked_by_policy")
 
 
+def test_a_page_read_here_after_a_failure_is_not_called_rescued(monkeypatch):
+    """A site that recovers within the refusal window is read by webgraft itself: the footer must
+    not claim an outside service read it (worst with web.keyless_rescue: false, no rescue at all)."""
+    ex._refused.clear()
+    ex.note_refused_url(URL, CERT)
+    assert ex.refused_here(URL) == CERT
+
+    class FakeClient:
+        headers = {"user-agent": "HermesAgent"}
+
+    class FakeCM:
+        async def __aenter__(self):
+            return FakeClient()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(ex, "http_client", lambda **k: FakeCM())
+
+    async def fake_read_page(client, url):
+        return ex.Page(url, "T", "content")
+
+    monkeypatch.setattr(ex, "read_page", fake_read_page)
+    asyncio.run(ex.read_pages([URL]))
+    assert ex.refused_here(URL) == ""
+    result = json.dumps({"results": [{"url": URL, "title": "T", "content": "content"}]})
+    assert gw._rescued(result) == []
+    ex._refused.clear()
+
+
 @pytest.mark.parametrize("results", [
     [failed(error="HTTP 403 from origin: Forbidden")],  # the site's own answer: Hermes does not rescue it
     [failed(), {"url": "https://a.example/", "title": "A", "content": "text"}],  # not the whole batch
