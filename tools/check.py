@@ -32,15 +32,19 @@ def run(cmd: list[str], **kwargs) -> bool:
 
 
 def tests(python: str, cutoff: str) -> bool:
+    # A Hermes terminal exports PYTHONPATH at its own venv's site-packages; left in the
+    # environment it leaks into the throwaway venv (Hermes's lxml shadowing the one installed
+    # here, built for another Python). The throwaway environment stands alone.
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
     with tempfile.TemporaryDirectory(prefix=f"gw-check-{python}-") as tmp:
         venv = Path(tmp) / "venv"
-        if not run(["uv", "venv", "--quiet", "--python", python, str(venv)]):
+        if not run(["uv", "venv", "--quiet", "--python", python, str(venv)], env=env):
             return False
         if not run(["uv", "pip", "install", "--quiet", "--python", str(venv), "--exclude-newer", cutoff,
-                    "-r", "pyproject.toml", "pytest", "firecrawl-anydoc", "pillow"]):
+                    "-r", "pyproject.toml", "pytest", "firecrawl-anydoc", "pillow"], env=env):
             return False
         exe = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        return run([str(exe), "-m", "pytest", "tests", "-q"])
+        return run([str(exe), "-m", "pytest", "tests", "-q"], env=env)
 
 
 def main() -> int:
