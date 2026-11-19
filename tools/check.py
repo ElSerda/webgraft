@@ -1,6 +1,6 @@
 """Local checks for webgraft, run before a release or a catalog re-pin. No cloud CI needed.
 
-    python tools/check.py                    # tests on Python 3.11 and 3.14, then Hermes doctor + validate
+    python tools/check.py                    # tests on Python 3.11 and 3.14, then Hermes doctor + validate + core contracts
     python tools/check.py --python 3.12      # other interpreter versions (repeatable)
     python tools/check.py --skip-hermes      # tests only
 
@@ -70,6 +70,9 @@ def main() -> int:
             print("\n== hermes plugins validate --install-deps")
             results.append(("hermes plugins validate --install-deps",
                             run(["hermes", "plugins", "validate", ".", "--install-deps"])))
+            print("\n== core contracts (drift detector)")
+            results.append(("core contracts",
+                            run([sys.executable, str(ROOT / "tools" / "core_contracts.py")])))
     print("\n== summary")
     for name, passed in results:
         print(f"  {'ok  ' if passed else 'FAIL'}  {name}")
