@@ -81,6 +81,40 @@ def test_hermes_skips_the_rescue_for_it():
     assert all(policy_blocked)
 
 
+@pytest.mark.parametrize("whole_batch_failed", [False, True])
+def test_the_provider_keeps_request_order_with_an_approved_entry(monkeypatch, whole_batch_failed):
+    """Order parity is a privacy contract: when url/result order breaks, Hermes's rescue treats
+    every entry as rescueable and the ring replaces the batch wholesale (web_tools_rescue.py,
+    _rescue_extract) — a policy refusal would go out. An approved entry stays at its request
+    position. hold marks the unreadable pages only when Hermes would rescue the whole batch."""
+    agent_pkg = types.ModuleType("agent")
+    base_mod = types.ModuleType("agent.web_search_provider")
+    base_mod.WebSearchProvider = type("WebSearchProvider", (), {})
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.web_search_provider", base_mod)
+    provider_mod = importlib.import_module("webgraft.provider")
+    provider = provider_mod.WebGraftProvider()
+    setup({"keyless_rescue": "ask"})
+
+    a, b, c = "https://a.example/", URL, "https://c.example/"
+    monkeypatch.setattr(rescue, "take_approved", lambda urls: {b: CERT})
+
+    async def fake_read(urls):
+        return [ex.Page(u, error=CERT) if u == c or whole_batch_failed else ex.Page(u, "T", "content of " + u)
+                for u in urls]
+
+    monkeypatch.setattr(ex, "read_pages", fake_read)
+    results = asyncio.run(provider.extract([a, b, c]))
+    assert [r["url"] for r in results] == [a, b, c]
+    assert results[1]["error"] == CERT and not results[1].get("blocked_by_policy")  # approved: goes to the rescue
+    if whole_batch_failed:
+        assert results[0]["blocked_by_policy"] and results[2]["blocked_by_policy"]  # kept here, at their positions
+    else:
+        assert results[0]["content"] == "content of " + a
+        # one readable page: Hermes would not rescue this batch, so hold leaves the failure as it is
+        assert results[2]["error"] == CERT and not results[2].get("blocked_by_policy")
+
+
 @pytest.mark.parametrize("results", [
     [failed(error="HTTP 403 from origin: Forbidden")],  # the site's own answer: Hermes does not rescue it
     [failed(), {"url": "https://a.example/", "title": "A", "content": "text"}],  # not the whole batch
