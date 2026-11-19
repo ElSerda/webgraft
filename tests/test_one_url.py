@@ -57,3 +57,11 @@ def test_the_guard_can_be_turned_off():
     ctx = setup({"one_url_per_call": False})
     assert ctx.hooks["pre_tool_call"](tool_name="web_extract", args={"urls": ["https://a.example/1", "https://b.example/2"]},
                                       session_id="s1") is None
+
+
+def test_a_null_setting_keeps_one_url_per_call():
+    # An explicit null in config.yaml is not "off": several URLs would spill the context.
+    ctx = setup({"one_url_per_call": None})
+    out = ctx.hooks["pre_tool_call"](tool_name="web_extract", args={"urls": ["https://a.example/1", "https://b.example/2"]},
+                                     session_id="s1", tool_call_id="c1")
+    assert out == {"action": "modify", "args": {"urls": ["https://a.example/1"]}}

@@ -758,6 +758,14 @@ def test_a_worker_stays_guarded_when_the_setting_is_on(worker):
     assert out["action"] == "approve" and "kanban_block" in out["message"]
 
 
+def test_a_null_setting_keeps_the_guard(worker):
+    # An explicit null in config.yaml is not "off": the default (guarded) applies, as for tool_guard.
+    ctx = setup({"tool_guard_kanban": None})
+    read_a_page(ctx, session="run1")
+    out = pre(ctx, "terminal", session="run1", args={"command": "curl https://x.example/"})
+    assert out["action"] == "approve"
+
+
 def test_a_chain_that_never_read_the_web_stays_free(worker):
     ctx = setup()
     first_turn(ctx, "child-run", card_message(parents=["t_clean"]))

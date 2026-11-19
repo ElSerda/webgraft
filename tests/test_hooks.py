@@ -206,6 +206,19 @@ def test_reminder_is_added_to_each_turn_and_can_be_turned_off():
     assert ctx.hooks["pre_llm_call"](session_id="s1", user_message="q") is None
 
 
+def test_a_null_remind_setting_keeps_the_reminder():
+    # An explicit null in config.yaml is not "off": the default applies.
+    ctx = setup({"remind": None})
+    assert "snippets are not sources" in ctx.hooks["pre_llm_call"](session_id="s1", user_message="q")
+
+
+def test_a_null_setting_reads_as_its_default():
+    ctx = setup({"anything": None})
+    assert gw._setting("anything", True) is True
+    assert gw._setting("anything", "ask") == "ask"
+    assert gw._setting("missing", True) is True
+
+
 def test_the_footer_follows_hermes_language_not_the_answer(monkeypatch):
     hermes_language(monkeypatch, "en")
     ctx = setup({"language": "answer"})  # an older setting: ignored now

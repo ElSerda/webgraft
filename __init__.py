@@ -39,9 +39,13 @@ _ctx = None
 
 def _setting(key: str, default):
     try:
-        return _ctx.get_config(key, default=default) if _ctx is not None else default
+        value = _ctx.get_config(key, default=default) if _ctx is not None else default
     except Exception:  # noqa: BLE001 - a settings problem must never break a turn
         return default
+    # An explicit null in config.yaml is not a value: the default applies. Without this, a
+    # boolean setting read as `if setting(...)` fails open on null (seen: tool_guard_kanban
+    # exempted workers, respect_ai_optout read pages that asked not to be).
+    return default if value is None else value
 
 
 def _payload(result: Any) -> dict:
@@ -927,6 +931,8 @@ def kanban_guard() -> bool:
     Off: the worker runs unguarded — nobody can answer its prompts — while Hermes's own worker
     rules still apply; the mark still follows its card, so a chat reading the board starts guarded."""
     value = _setting("tool_guard_kanban", True)
+    if value is None:
+        return True  # an explicit null in config.yaml is not "off": the default applies
     if isinstance(value, str):
         return value.strip().lower() not in ("false", "off", "0", "no")
     return bool(value)
