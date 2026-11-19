@@ -117,6 +117,7 @@ def state() -> dict:
         "chromium": browser.recorded(),
         "ocr_python": extract.ocr_python(),
         "char_limit": web.get("extract_char_limit"),
+        "kanban_guard": _config_value("plugins.entries.webgraft.settings.tool_guard_kanban"),
     }
 
 
@@ -153,6 +154,10 @@ def print_state(s: dict, title: str = "webgraft status") -> None:
     limit = s.get("char_limit")
     ok(f"Page window        {limit if limit is not None else HERMES_CHAR_LIMIT} characters per page"
        + ("" if limit is not None else " (Hermes's default)"))
+    kg = s.get("kanban_guard")
+    guarded = True if kg is None else str(kg).strip().lower() not in ("false", "off", "0", "no")
+    (ok if guarded else warn)("Kanban workers     " + ("guarded (tool_guard)" if guarded
+                                                       else "unguarded: Hermes's own worker rules only"))
 
 
 PLACES = {leaves.HERE: "this machine", leaves.NETWORK: "your network", leaves.HELD: "held by webgraft",
@@ -531,8 +536,28 @@ def step_skill(args, interactive: bool) -> None:
     _set("skills.auto_load", json.dumps([*current, SKILL]))
 
 
+def step_kanban_guard(args, interactive: bool) -> None:
+    header("7. Kanban workers")
+    info("A Kanban worker runs with nobody to answer approval prompts: guarded, its tools")
+    info("outside the card's workspace are refused, and the card can block on them.")
+    current = _config_value("plugins.entries.webgraft.settings.tool_guard_kanban")
+    guarded = True if current is None else str(current).strip().lower() not in ("false", "off", "0", "no")
+    wanted = args.kanban_guard if args.kanban_guard is not None else _confirm(
+        "Keep tool_guard on Kanban workers?", guarded, interactive,
+        "On: a worker's tools outside its workspace go to the approval prompt, refused where\n"
+        "nobody can answer; the card blocks with the reason.\n"
+        "Off: workers run unguarded. Hermes still refuses execute_code and dangerous commands\n"
+        "in a worker, but an ordinary command or a write elsewhere runs unapproved: a page that\n"
+        "steers a card can act through its worker. Chat and cron keep the guard.")
+    if wanted == guarded and current is not None:
+        ok(f"Kanban workers {'guarded' if guarded else 'unguarded'} (unchanged)")
+        return
+    _set("plugins.entries.webgraft.settings.tool_guard_kanban", "true" if wanted else "false")
+    ok(f"Kanban workers {'guarded' if wanted else 'unguarded'}")
+
+
 def step_test() -> bool:
-    header("7. Test")
+    header("8. Test")
     page, missing = asyncio.run(extract.read_pages([TEST_PAGE, TEST_MISSING]))
     good = bool(page.content) and not page.error
     if good:
@@ -631,6 +656,11 @@ def _setup_parser(parser) -> None:
     sk = setup.add_mutually_exclusive_group()
     sk.add_argument("--skill", dest="skill", action="store_true", default=None, help="Auto-load the research skill")
     sk.add_argument("--no-skill", dest="skill", action="store_false", help="Do not auto-load the research skill")
+    kg = setup.add_mutually_exclusive_group()
+    kg.add_argument("--kanban-guard", dest="kanban_guard", action="store_true", default=None,
+                    help="Keep tool_guard on Kanban workers (the default)")
+    kg.add_argument("--no-kanban-guard", dest="kanban_guard", action="store_false",
+                    help="Let Kanban workers run unguarded (nobody answers their prompts)")
     setup.add_argument("--yes", action="store_true", help="Accept the defaults without asking")
     rm = subs.add_parser("uninstall", help="Undo setup before `hermes plugins remove webgraft`")
     rm.add_argument("--yes", action="store_true", help="Do not ask for confirmation")
@@ -663,6 +693,7 @@ def handle(args) -> int:
     step_ocr(args, s, interactive)
     step_char_limit(args, s, interactive)
     step_skill(args, interactive)
+    step_kanban_guard(args, interactive)
     passed = step_test()
     print_state(state(), "Saved settings")  # what was really saved, so a skipped step shows here
     print()

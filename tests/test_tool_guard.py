@@ -698,6 +698,66 @@ def test_a_child_of_a_card_that_read_the_web_starts_guarded(worker):
     assert gw._card_recorded("research", "t_child")  # in turn, for the grandchildren
 
 
+# ---------------------------------------------------------------- tool_guard_kanban: off exempts the worker
+
+
+@pytest.mark.parametrize("value", [False, "false", "off", "0", "no"])
+def test_an_exempt_worker_runs_its_tools_unguarded(worker, value):
+    ctx = setup({"tool_guard_kanban": value})
+    read_a_page(ctx, session="run1")
+    for tool, args in (("terminal", {"command": "curl https://x.example/"}),
+                       ("write_file", {"path": "C:/elsewhere/note.md", "content": "x"}),
+                       ("execute_code", {"code": "print(1)"}),
+                       ("kanban_create", {"title": "another card"})):
+        assert pre(ctx, tool, session="run1", args=args) is None
+
+
+def test_the_exemption_does_not_touch_a_chat():
+    ctx = setup({"tool_guard_kanban": False})
+    read_a_page(ctx)
+    out = pre(ctx, "terminal", args={"command": "echo hi"})
+    assert out["action"] == "approve"
+
+
+def test_an_exempt_worker_still_records_its_card(worker):
+    ctx = setup({"tool_guard_kanban": False})
+    read_a_page(ctx, session="run1")
+    assert pre(ctx, "kanban_complete", session="run1") is None
+    assert gw._card_recorded("research", "t_child")
+
+
+def test_a_child_of_an_exempt_workers_card_is_exempt_too_and_stays_marked(worker):
+    ctx = setup({"tool_guard_kanban": False})
+    worker(task="t_parent")
+    read_a_page(ctx, session="parent-run")
+    assert pre(ctx, "terminal", session="parent-run", args={"command": "echo hi"}) is None
+    assert gw._card_recorded("research", "t_parent")
+    new_worker_process()
+    worker(task="t_child")
+    first_turn(ctx, "child-run", card_message(parents=["t_parent"]))
+    # the child is a dispatcher worker too: exempt, but its card is marked in turn
+    assert pre(ctx, "terminal", session="child-run", args={"command": "echo hi"}) is None
+    assert gw._card_recorded("research", "t_child")
+
+
+def test_a_chat_listing_an_exempt_workers_card_starts_guarded(worker, monkeypatch):
+    ctx = setup({"tool_guard_kanban": False})
+    read_a_page(ctx, session="run1")
+    assert pre(ctx, "kanban_complete", session="run1") is None
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    monkeypatch.delenv("HERMES_KANBAN_BOARD")
+    listed = json.dumps({"tasks": [{"id": "t_other"}, {"id": "t_child", "result": "summary"}]})
+    ctx.hooks["post_tool_call"](tool_name="kanban_list", args={}, result=listed, session_id="chat")
+    assert pre(ctx, "terminal", session="chat")["action"] == "approve"
+
+
+def test_a_worker_stays_guarded_when_the_setting_is_on(worker):
+    ctx = setup({"tool_guard_kanban": True})
+    read_a_page(ctx, session="run1")
+    out = pre(ctx, "terminal", session="run1", args={"command": "curl https://x.example/"})
+    assert out["action"] == "approve" and "kanban_block" in out["message"]
+
+
 def test_a_chain_that_never_read_the_web_stays_free(worker):
     ctx = setup()
     first_turn(ctx, "child-run", card_message(parents=["t_clean"]))

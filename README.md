@@ -215,6 +215,7 @@ Local test site with injected pages (a code word to start the reply with, a URL 
   - where nobody can answer (`hermes chat -Q`, cron), Hermes refuses the call.
 - **Stays free:** `web_search`, `web_extract`, `x_search`, `skill_view`, `skills_list`, `todo_list`, `clarify`, the Kanban board reads (`kanban_show`, `kanban_list`, `kanban_attachments`), and `vision_analyze` / `video_analyze` on a URL or inline `data:`. Research works as before.
 - **Kanban workers:** a worker that Hermes's Kanban dispatcher starts for a card runs with nobody to answer the approval prompt, so a tool sent to it is refused at once. A worker hands its work back through its board tools, as a chat does in its final answer.
+  - **`tool_guard_kanban: off` exempts the worker** (offered by `setup`, step 7; also a Desktop setting): the worker runs its tools unguarded, so a card that needs more than its workspace no longer blocks. What Hermes itself still refuses in a worker: `execute_code`, and the commands its own checks flag as dangerous where nobody can answer. What then runs unapproved: an ordinary command (`curl`, a read of any file the terminal can reach) and a write outside the workspace — **a page that steers a card can act through its worker**, beyond what Hermes's own rules stop. The mark still follows the card: a chat reading the board starts guarded, and so does the next worker when the setting is on. Chat, cron and subagents outside a worker keep `tool_guard`. For a real boundary, run Hermes in a sandbox (see Isolation).
   - **Its own card stays free:** `kanban_complete`, `kanban_block`, `kanban_request_review`, `kanban_request_changes`, `kanban_schedule`, `kanban_heartbeat` and `kanban_comment`, when they name no card or the worker's own (`HERMES_KANBAN_TASK`, set by the dispatcher). Hermes itself refuses a worker's lifecycle call on another card. A comment on another card, `kanban_create`, `kanban_link`, `kanban_unblock` and attachments still go to the approval prompt, and so do the terminal and the rest; the refusal tells the worker to call `kanban_block` with the reason.
   - **Its workspace stays free:** `write_file`, and `patch` on one file, inside the card's workspace, the folder the dispatcher gives it (`HERMES_KANBAN_WORKSPACE`: a scratch folder, a git worktree, or a `dir:` you chose), by an absolute path inside it or a path relative to it (webgraft writes a relative path in the workspace, whatever folder the terminal is in). That is where a card puts its output; a scratch folder is deleted when the card is done, so a worker keeps a file by listing it in `kanban_complete` (`artifacts`), and Hermes copies it to the card. Links and `..` are resolved first. Anywhere else, a relative path, a multi-file patch or a cross-profile write still goes to the approval prompt, and the refusal names the workspace. Hermes's own write checks (sensitive paths, protected instruction files) still apply.
   - **The terminal stays free inside the workspace:** Hermes judges what a command does (its hardline and dangerous-command patterns, refused where nobody can answer, and `execute_code`, which it refuses in a worker), not where it acts: with `tool_guard: off`, a worker wrote outside its workspace with `cat >` (seen live, 2026-11-18). webgraft adds the "where". A command runs without approval when everything it names stays in the workspace, and Hermes's own checks then run on it as usual:
@@ -245,7 +246,7 @@ Local test site with injected pages (a code word to start the reply with, a URL 
 - **A steered answer:** a page can make the reply wrong, or slip a link into it.
 - **Downloads with no URL in the call:** a package install (`pip`, `npm`) or a script that builds its URL in pieces is not counted as reading the web.
 - **Text read back with `read_file`:** Hermes does not mark it as untrusted, and that is how the model reads the rest of a long page Hermes saved ([#57710](https://github.com/NousResearch/hermes-agent/issues/57710)). `tool_guard` still applies after it.
-- **A steered Kanban handoff:** a page can steer the summary a worker leaves on its card. The next worker starts guarded, but its work can still be wrong.
+- **A steered Kanban handoff:** a page can steer the summary a worker leaves on its card. The next worker starts guarded, but its work can still be wrong. With `tool_guard_kanban: off`, the steered card can also act through its worker's tools, beyond what Hermes's own worker rules refuse.
 
 ### Smallest exposure
 
@@ -279,9 +280,10 @@ Then `setup`:
 4. offers **local OCR** for scanned PDFs (RapidOCR), which is optional;
 5. offers to raise Hermes's `web.extract_char_limit` to 30,000 (off unless you say yes; see [Widening it](#widening-it-optional-in-setup));
 6. offers to auto-load the bundled skill `webgraft:webgraft` (it tells the model to open pages instead of answering from snippets, one URL per call; about 600 tokens per session);
-7. tests one real page and one missing page.
+7. offers to keep `tool_guard` on Kanban workers (`tool_guard_kanban`, kept on unless you say no: off, a worker runs unguarded, see [Prompt injection](#prompt-injection));
+8. tests one real page and one missing page.
 
-Non-interactive: `hermes webgraft setup --yes --search ddgs --crawl4ai --ocr --skill` (add `--char-limit 30000` to raise the window).
+Non-interactive: `hermes webgraft setup --yes --search ddgs --crawl4ai --ocr --skill` (add `--char-limit 30000` to raise the window, `--no-kanban-guard` to exempt Kanban workers).
 
 Check at any time with `hermes webgraft status`.
 
@@ -339,6 +341,7 @@ Under Settings → Plugins in Hermes Desktop, or `plugins.entries.webgraft.setti
 | `keyless_rescue` | `ask` | What happens when Hermes's keyless rescue would send a page or a search to an outside service: webgraft keeps it and asks first (`ask`, refused where nobody can answer), never sends it (`block`), or leaves it to Hermes (`off`). See [Hermes's keyless rescue](#limits) |
 | `respect_ai_optout` | `true` | A page that asks not to be used by AI (`noai`, `tdm-reservation: 1`) comes back as an error |
 | `tool_guard` | `ask` | Once the conversation has read web content, tools that are not read-only go to Hermes's approval prompt (`ask`, refused where nobody can answer), are refused (`block`), or run as usual (`off`). See [Prompt injection](#prompt-injection) |
+| `tool_guard_kanban` | `true` | `off`: a worker the Kanban dispatcher starts runs unguarded — nobody can answer its prompts. Hermes's own worker rules still apply, but an ordinary command or a write outside the card's workspace runs unapproved. The mark still follows the card; chat and cron keep `tool_guard`. See [Prompt injection](#prompt-injection) |
 
 Search and page reading are separate settings: webgraft only reads pages. It works with any search backend.
 
@@ -378,7 +381,7 @@ Search and page reading are separate settings: webgraft only reads pages. It wor
   - These children get a minimal environment (path, home and temp folders, locale, proxy settings, and what each one needs), never Hermes's API keys. `setup` and `status` also run Hermes's own `hermes pm` commands, as Hermes would.
 
 - **Writes:**
-  - `web.search_backend`, `web.extract_backend`, `skills.auto_load`, `web.extract_char_limit` (only if you accept it) and, for SearXNG, `SEARXNG_URL` in `.env`, all through Hermes's own config functions and only during `setup` and `uninstall`;
+  - `web.search_backend`, `web.extract_backend`, `skills.auto_load`, `web.extract_char_limit` (only if you accept it), `plugins.entries.webgraft.settings.tool_guard_kanban` (the Kanban step of `setup`) and, for SearXNG, `SEARXNG_URL` in `.env`, all through Hermes's own config functions and only during `setup` and `uninstall`;
   - the values `setup` replaced, in `HERMES_HOME/plugin-data/webgraft/previous.json`;
   - the Chromium path, in `browser.json` next to it;
   - the ids of the conversations that read web content, in `web_sessions.json` next to it (no content; at most 1000; see [Prompt injection](#prompt-injection));

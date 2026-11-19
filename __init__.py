@@ -922,6 +922,16 @@ def guard_mode() -> str:
     return value if value in ("ask", "block", "off") else "ask"
 
 
+def kanban_guard() -> bool:
+    """tool_guard_kanban: whether a worker the Kanban dispatcher spawns is guarded (default true).
+    Off: the worker runs unguarded — nobody can answer its prompts — while Hermes's own worker
+    rules still apply; the mark still follows its card, so a chat reading the board starts guarded."""
+    value = _setting("tool_guard_kanban", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "off", "0", "no")
+    return bool(value)
+
+
 def _hermes_home() -> Optional[Path]:
     try:
         from hermes_constants import get_hermes_home
@@ -963,6 +973,11 @@ def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[d
     if not _is_marked(session_id):
         return None
     card = _kanban_card()
+    if card and not kanban_guard():
+        # The worker is exempt, not its card: what it leaves on the board still marks the next
+        # worker or chat that reads it. Hermes's own worker rules keep running on every call.
+        _record_card(*card)
+        return None
     if card and tool_name in KANBAN_OWN_CARD_TOOLS and _on_card(args, card[1]):
         _record_card(*card)  # what the worker leaves on its card carries what it read
         return None
