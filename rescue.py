@@ -234,7 +234,15 @@ HOOK_BLOCK = ("webgraft kept this on this machine (keyless_rescue: block): Herme
 def pre_keyless_rescue_webgraft(tool_name: str = "", backend: str = "", error: str = "", urls: Any = None,
                                 query: Any = None, **_: Any) -> dict | None:
     """webgraft's answer when Hermes is about to rescue a failed web_extract or web_search, by the
-    keyless_rescue setting: off lets it run, block refuses it, ask sends it to the approval prompt."""
+    keyless_rescue setting: off lets it run, block refuses it, ask sends it to the approval prompt.
+
+    Reads both payload shapes: the one proposed in #155838 (tool_name, backend) and the one
+    implemented in PR #155917 (kind 'search'/'extract', backend_name). A name mismatch would
+    leave tool_name empty and return None silently — the rescue would run unguarded."""
+    kind = str(_.get("kind") or "").strip().lower()
+    if kind in ("search", "extract"):
+        tool_name = "web_" + kind
+    backend = backend or _.get("backend_name") or ""
     current = mode()
     if current == "off" or tool_name not in ("web_extract", "web_search"):
         return None

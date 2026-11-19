@@ -145,6 +145,30 @@ def test_a_page_read_here_after_a_failure_is_not_called_rescued(monkeypatch):
     ex._refused.clear()
 
 
+@pytest.mark.parametrize("payload", [
+    {"tool_name": "web_extract", "backend": "webgraft", "urls": [URL]},          # #155838 proposal
+    {"kind": "extract", "backend_name": "webgraft", "urls": [URL]},              # PR #155917 shape
+])
+def test_the_rescue_hook_callback_reads_both_payload_shapes(payload):
+    setup({"keyless_rescue": "block"})
+    assert rescue.pre_keyless_rescue_webgraft(error=CERT, **payload)["action"] == "block"
+    setup({"keyless_rescue": "ask"})
+    out = rescue.pre_keyless_rescue_webgraft(error=CERT, **payload)
+    assert out["action"] == "approve" and "webgraft" in out["message"]
+    assert out["rule_key"] == "webgraft:keyless_rescue:web_extract"
+    setup({"keyless_rescue": "off"})
+    assert rescue.pre_keyless_rescue_webgraft(error=CERT, **payload) is None
+
+
+def test_the_rescue_hook_callback_reads_the_search_shape():
+    setup({"keyless_rescue": "ask"})
+    out = rescue.pre_keyless_rescue_webgraft(error="backend down", kind="search",
+                                             backend_name="searxng", query="sensitive query")
+    assert out["action"] == "approve" and "sensitive query" in out["message"]
+    assert out["rule_key"] == "webgraft:keyless_rescue:web_search"
+    assert rescue.pre_keyless_rescue_webgraft(error="x", kind="unknown") is None
+
+
 @pytest.mark.parametrize("results", [
     [failed(error="HTTP 403 from origin: Forbidden")],  # the site's own answer: Hermes does not rescue it
     [failed(), {"url": "https://a.example/", "title": "A", "content": "text"}],  # not the whole batch
