@@ -460,6 +460,7 @@ def _media_source(tool_name: str, args: Any) -> str:
 def _brings_web(tool_name: str, args: Any = None) -> bool:
     """Whether a call brings web content into the conversation: a web tool, vision_analyze /
     video_analyze on a URL, or a command or script that holds an http(s) URL."""
+    tool_name = tool_name or ""  # a crash here would leave the conversation unmarked: guard off
     if tool_name in WEB_TOOLS or tool_name.startswith(WEB_TOOL_PREFIXES):
         return True
     if tool_name in MEDIA_TOOLS:

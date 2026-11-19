@@ -219,6 +219,15 @@ def test_a_null_setting_reads_as_its_default():
     assert gw._setting("missing", True) is True
 
 
+def test_a_null_tool_name_never_breaks_a_hook():
+    # A crash in _brings_web would leave the conversation unmarked: the guard silently off.
+    ctx = setup()
+    assert gw._brings_web(None) is False
+    assert ctx.hooks["post_tool_call"](tool_name=None, args=None, result=None, session_id="s1") is None
+    out = ctx.hooks["pre_tool_call"](tool_name=None, args=None, session_id="s1")
+    assert out is None or out["action"] in ("approve", "block")  # free or guarded, never a crash
+
+
 def test_the_footer_follows_hermes_language_not_the_answer(monkeypatch):
     hermes_language(monkeypatch, "en")
     ctx = setup({"language": "answer"})  # an older setting: ignored now
