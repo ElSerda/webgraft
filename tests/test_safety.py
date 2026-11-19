@@ -451,8 +451,11 @@ def _alive(pid: int) -> bool:
     import os
     import subprocess as sp
     if os.name == "nt":
-        out = sp.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
-        return str(pid) in out
+        # tasklist answers in the console's code page (CP850 on a French Windows), never UTF-8:
+        # with text=True under PYTHONUTF8 (Hermes sets it), the reader thread dies on the first
+        # non-UTF-8 byte and stdout comes back None. Read bytes; a PID is ASCII in any code page.
+        out = sp.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True).stdout or b""
+        return str(pid).encode() in out.split()
     try:
         os.kill(pid, 0)
     except OSError:
