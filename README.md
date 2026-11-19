@@ -413,6 +413,7 @@ Hermes gives a plugin no documented way to know which other plugins register tha
   - What webgraft cannot hold: a call Hermes stops at its own `web.extract_timeout` (webgraft stops five seconds before it, to answer in time), and the first search of an outage. `web.keyless_rescue: false` under `web:` in Hermes's `config.yaml` stops both, for every backend; restart the gateway after the change.
   - A local backend should not fall back to the cloud silently: webgraft asks Hermes to change the default ([requests for Hermes](#for-hermes)).
 
+- **Hermes's safe mode loads no plugins.** Under `hermes --safe-mode`, Hermes never discovers plugins (`discover_and_load` returns early: « Safe workers never discover »): webgraft does not run at all — no guard, no marks, no footer, and no local page reading either; the `webgraft` extract backend is not registered, Hermes's own backend resolution and safe-worker policy apply.
 - **From Hermes itself (the harness), documented rather than worked around:**
   - **One rewrite per tool result.** Like replies, a `web_extract` or `web_search` result keeps only the first plugin rewrite (`transform_tool_result`). webgraft rewrites a result only to add its note (URLs left out, a page that could not be read, an empty search); when another plugin rewrites the same result, one of the two rewrites is lost, depending on load order.
   - **Session ids.** `pre_llm_call` and `transform_llm_output` receive `session_id` only, not the `conversation_id` the plugin guide recommends for per-conversation state. When Hermes compresses a conversation into a new session (`compression.in_place: false`), webgraft follows it through `parent_session_id` (see Prompt injection).
@@ -480,6 +481,13 @@ bash tools/catalog_ci.sh path/to/webgraft.yaml
 - **No argument:** checks the entry already published on Hermes's `main`.
 
 The tests use made-up pages and need no network; the document tests start a child Python.
+
+**Hook crash semantics (Hermes v0.23.2+, `hermes_cli/plugins_dispatch.py`):** a `pre_tool_call`
+callback that raises or times out fails **closed** — Hermes blocks the call. Every other hook
+fails **open** — the callback is skipped. A crash while `post_tool_call` records a web read would
+leave the conversation unmarked (the guard silently off for the rest of it), so the recording and
+transform paths are kept crash-proof: a null/malformed-input fuzz runs every hook and helper
+(3700+ calls, zero crashes at the boundaries). Keep it that way when adding code to these paths.
 
 Documents are read with anydoc (`firecrawl-anydoc`), which Hermes provides, so it is not a plugin dependency; `tools/check.py` installs it in the test environment.
 
