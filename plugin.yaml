@@ -65,3 +65,8 @@ config_schema:
     default: true
     label: Respect AI opt-outs
     description: "A page that asks not to be used by AI (noai in X-Robots-Tag or a robots meta tag, or tdm-reservation: 1) comes back as an error instead of content"
+  search_demote:
+    type: bool
+    default: false
+    label: Demote off-query search results
+    description: "A web_search hit with no query word in its title or URL moves to the tail of the list, keeping its relative order; the backend ranking is otherwise untouched and nothing is removed. Case-folded match without diacritic folding (Noûs does not match nous), common French/English function words ignored. Targets locale noise (a common word matching an entity query) without re-scoring consensus results"

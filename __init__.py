@@ -1194,8 +1194,50 @@ UNREAD_NOTE = ("This page could not be read (see its error). Search snippets are
                "never ends the research. If the user asked for this page itself, say that it could not be read.")
 
 
+_DEMOTE_STOPWORDS = frozenset(
+    "le la les de des du un une et en nous vous il elle on je tu me te se ce cet cette ces "
+    "mon ton son ma ta sa nos vos notre votre leur leurs y a au aux avec sans pour par dans "
+    "sur sous vers chez que qui quoi dont ou ne pas plus jamais rien tout tous toute toutes "
+    "est sont ont fait the an of to in is it for and or as at by from this that these those "
+    "be are was were been being have has had do does did will would can could should may "
+    "might must not no nor so than too very just about into over after before then once "
+    "here there when where why how all any both each few more most other some such only own same".split()
+)
+
+
+def _demote_zero_match(data: dict, query: str) -> bool:
+    """Move web_search hits whose title and URL contain no query word to the tail of the list.
+
+    The backend's order (its consensus ranking) is preserved within each group; nothing is
+    removed and no score is touched. Descriptions are not matched: boilerplate ("Contactez-nous")
+    false-matches there. Case-folded word match, no diacritic folding (Noûs does not match nous),
+    common FR/EN function words ignored. Lexical, not semantic: a title that genuinely carries a
+    query word keeps its native rank. Returns True when the list was reordered.
+    """
+    hits = (data.get("data") or {}).get("web")
+    if not isinstance(hits, list) or len(hits) < 2 or not all(isinstance(h, dict) for h in hits):
+        return False
+    tokens = {t for t in re.split(r"[^a-z0-9]+", query.casefold()) if len(t) > 1} - _DEMOTE_STOPWORDS
+    if not tokens:
+        return False
+
+    def hit_words(hit: dict) -> set:
+        text = " ".join(str(hit.get(k) or "") for k in ("title", "url")).casefold()
+        return set(re.split(r"[^a-z0-9]+", text))
+
+    flags = [bool(tokens & hit_words(h)) for h in hits]
+    keep = [h for h, f in zip(hits, flags) if f]
+    if not keep or len(keep) == len(hits):
+        return False
+    demoted = [h for h, f in zip(hits, flags) if not f]
+    data["data"]["web"] = keep + demoted
+    for i, h in enumerate(data["data"]["web"], 1):
+        h["position"] = i
+    return True
+
+
 def _annotate(tool_name: str = "", result: Any = None, session_id: str = "", tool_call_id: Any = None,
-              **_: Any) -> Optional[str]:
+              args: Any = None, **_: Any) -> Optional[str]:
     """Adds a webgraft_note to three tool results: a web_extract call whose other URLs _guard_tool
     left out (they are listed), a web_extract call that read no page (open the next result), and a
     web_search that found nothing (an empty result is not an absence)."""
@@ -1230,9 +1272,17 @@ def _annotate(tool_name: str = "", result: Any = None, session_id: str = "", too
         if not isinstance(data, dict) or not data.get("success"):
             return None
         hits = (data.get("data") or {}).get("web") if isinstance(data.get("data"), dict) else None
-        if hits != []:
+        if hits == []:
+            note = EMPTY_SEARCH_NOTE
+        else:
+            if _setting("search_demote", False) and isinstance(hits, list) and hits:
+                query = str(args.get("query") or "") if isinstance(args, dict) else ""
+                try:
+                    if _demote_zero_match(data, query):
+                        return json.dumps(data, ensure_ascii=False)
+                except Exception:  # noqa: BLE001 - fail-open: never break a search result
+                    pass
             return None
-        note = EMPTY_SEARCH_NOTE
     else:
         return None
     if not isinstance(result, str):
