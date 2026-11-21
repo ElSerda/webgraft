@@ -58,6 +58,7 @@ def run_turn(ctx, answer, tools, session="s1"):
 
 def setup(settings=None):
     gw._turns.clear()
+    gw._appended_footers.clear()
     ctx = FakeCtx(settings)
     gw.register(ctx)
     return ctx
@@ -281,15 +282,34 @@ def test_never_turns_the_footer_off():
 
 def test_model_is_told_the_footer_under_its_earlier_answers_is_not_its_own():
     ctx = setup()
+    foot = "Sources (opened pages):\n- https://portal.example/cloud"
     history = [{"role": "user", "content": "specs?"},
-               {"role": "assistant", "content": "It costs $20.\n\nSources (opened pages):\n- https://portal.example/cloud"}]
+               {"role": "assistant", "content": "It costs $20.\n\n" + foot}]
+    gw._record_footer("s1", foot)  # webgraft appended this footer under s1's earlier answer
     context = ctx.hooks["pre_llm_call"](session_id="s1", user_message="and the disk?", conversation_history=history)
     assert 'were added by webgraft, not written by you' in context
     assert '"Sources (opened pages):"' in context
     plain = ctx.hooks["pre_llm_call"](session_id="s2", user_message="hi", conversation_history=[])
     assert "not written by you" not in plain
     ctx = setup({"remind": False})
+    gw._record_footer("s3", foot)
     assert "not written by you" in ctx.hooks["pre_llm_call"](session_id="s3", user_message="q", conversation_history=history)
+
+
+def test_a_footer_quoted_from_another_session_is_not_attributed_to_webgraft():
+    # The model pasted another session's answer (with its webgraft footer) into its own reply: the
+    # heading is in the history, but webgraft appended no footer in THIS conversation. No note.
+    ctx = setup()
+    foreign = "Sources (opened pages):\n- Releases | Nous Research: https://nousresearch.com/releases"
+    history = [{"role": "user", "content": "run a search on the server"},
+               {"role": "assistant", "content": "The server answered:\n\n" + foreign}]
+    context = ctx.hooks["pre_llm_call"](session_id="s1", user_message="thanks", conversation_history=history)
+    assert "not written by you" not in (context or "")
+    # Once webgraft really appends a footer here, its own footer in history triggers the note again.
+    own = "Sources (opened pages):\n- https://portal.example/cloud"
+    gw._record_footer("s1", own)
+    history2 = [{"role": "assistant", "content": "It costs $20.\n\n" + own}]
+    assert "not written by you" in ctx.hooks["pre_llm_call"](session_id="s1", user_message="and?", conversation_history=history2)
 
 
 def test_an_empty_search_gets_a_note_and_a_search_with_results_does_not():
@@ -341,7 +361,7 @@ def test_the_skill_is_registered_under_the_plugin_name_with_its_description():
     name, path, description, frontmatter = ctx.skills[0]
     assert path.name == "SKILL.md" and path.parent.name == "webgraft"
     assert description == "Answer web questions from opened pages, not snippets."
-    assert frontmatter["name"] == "webgraft" and frontmatter["version"] == "1.4.0"
+    assert frontmatter["name"] == "webgraft" and frontmatter["version"] == gw._frontmatter(path)["version"]
     assert frontmatter["platforms"] == ["linux", "windows"]  # a list, or Hermes hides the skill on every OS
 
 

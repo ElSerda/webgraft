@@ -129,15 +129,19 @@ FOOTER_NOTE = (
 )
 
 
-def _footer_in_history(history: Any) -> str:
-    """The footer heading found under an earlier answer, if any."""
-    headings = sorted(footer.headings())
+def _footer_in_history(history: Any, session_id: str = "") -> str:
+    """The heading of a footer webgraft itself appended under an earlier answer of this conversation,
+    if any. A footer quoted from another session's output carries the same heading but is not
+    webgraft's own: matching only the footers this instance recorded avoids attributing it to webgraft."""
+    recorded = _recorded_footers(session_id)
+    if not recorded:
+        return ""
     for message in history if isinstance(history, list) else []:
         if isinstance(message, dict) and message.get("role") == "assistant":
             content = str(message.get("content") or "")
-            for heading in headings:
-                if heading in content:
-                    return heading
+            for f in recorded:
+                if f and f in content:
+                    return f.split("\n", 1)[0]
     return ""
 
 
@@ -299,7 +303,7 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
     if _setting("remind", True):
         footer = FOOTER_SENTENCE if _footer_on() else NO_FOOTER_SENTENCE
         parts.append((URL_REMINDER if _has_url(_text_of(user_message)) else REMINDER) + " " + footer)
-    heading = _footer_in_history(conversation_history)
+    heading = _footer_in_history(conversation_history, session_id)
     if heading and compat.sources_mode(_setting("show_sources", "always")) != "never":
         parts.append(FOOTER_NOTE.format(heading=heading))
     return " ".join(parts) or None
@@ -566,6 +570,76 @@ def _is_marked(session_id: str) -> bool:
         while len(_web_sessions) > MAX_WEB_SESSIONS:
             _web_sessions.popitem(last=False)
     return True
+
+
+# The footers webgraft itself appended under this conversation's answers (their exact text), kept on
+# disk like the marks. The note "webgraft added these, do not write one" fires only for those: a footer
+# quoted from another session's output (pasted into an answer) carries the same heading but is not
+# webgraft's own, and must not be attributed to it.
+APPENDED_FOOTERS_FILE = "appended_footers.json"
+MAX_FOOTERS_PER_SESSION = 20
+_appended_footers: "OrderedDict[str, list[str]]" = OrderedDict()
+
+
+def _footers_file() -> Optional[Path]:
+    try:
+        from plugins.plugin_storage import plugin_data_dir  # Hermes plugin public API
+        return plugin_data_dir("webgraft") / APPENDED_FOOTERS_FILE
+    except Exception:  # noqa: BLE001 - outside Hermes: memory only
+        return None
+
+
+def _saved_footers(path: Optional[Path]) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path and path.is_file() else {}
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: [s for s in v if isinstance(s, str)][-MAX_FOOTERS_PER_SESSION:]
+            for k, v in data.items() if isinstance(k, str) and isinstance(v, list)}
+
+
+def _record_footer(session_id: str, text: str) -> None:
+    """Remember a footer webgraft appended under this conversation's answer (memory + disk)."""
+    if not session_id or not text:
+        return
+    with _lock:
+        lst = ([s for s in _appended_footers.get(session_id, []) if s != text] + [text])[-MAX_FOOTERS_PER_SESSION:]
+        _appended_footers[session_id] = lst
+        _appended_footers.move_to_end(session_id)
+        while len(_appended_footers) > MAX_SESSIONS:
+            _appended_footers.popitem(last=False)
+    path = _footers_file()
+    if path is None:
+        return
+    with _marks_lock:
+        data = _saved_footers(path)
+        data[session_id] = lst
+        data = {k: data[k] for k in list(data)[-MAX_SESSIONS:]}
+        try:
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass  # the footer still holds in this process
+
+
+def _recorded_footers(session_id: str) -> list[str]:
+    """The footers webgraft appended under this conversation's answers: in this process, or on disk."""
+    if not session_id:
+        return []
+    with _lock:
+        if session_id in _appended_footers:
+            return list(_appended_footers[session_id])
+    saved = _saved_footers(_footers_file()).get(session_id, [])
+    if saved:
+        with _lock:
+            _appended_footers[session_id] = saved
+            _appended_footers.move_to_end(session_id)
+            while len(_appended_footers) > MAX_SESSIONS:
+                _appended_footers.popitem(last=False)
+    return saved
 
 
 # Kanban cards worked by a conversation that read the web. What a worker leaves on its card (summary,
@@ -1393,7 +1467,10 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
                         list(turn["rescued"].items()), turn["search_rescued"], kept,
                         kept_hint=bool(kept) and turn.get("kept_ask", False), sent=sent)
     # Keep the answer byte for byte: Hermes then prints only the added footer after a streamed reply.
-    return f"{response_text}\n\n{text}" if text else None
+    if not text:
+        return None
+    _record_footer(session_id, text)
+    return f"{response_text}\n\n{text}"
 
 
 def _frontmatter(path: Path) -> dict:
