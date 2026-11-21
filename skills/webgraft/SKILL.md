@@ -1,7 +1,7 @@
 ---
 name: webgraft
 description: "Answer web questions from opened pages, not snippets."
-version: 1.4.0
+version: 1.5.0
 author: ElSerda
 license: MIT
 platforms: [linux, windows]
@@ -45,12 +45,17 @@ and any search backend for `web_search`.
 
 ### Find pages
 
-1. Call `web_search` with a precise query.
-   - Keep product names and model numbers exact.
-   - Use English for technical topics.
+1. Call `web_search` for exactly what the user asked.
+   - Keep the user's question and named entities verbatim. Never translate or substitute a
+     name: "Nous Research" is a company — search `"Nous Research"`, not "Notre Recherche".
+   - Quoting multi-word entities, searching in English for technical topics, and `site:` for
+     official sources change the syntax, never the substance or the names.
 
 2. Pick the 2 or 3 most relevant results.
-   - Prefer official sources: maker pages, datasheets, documentation.
+   - Prefer official sources: maker pages, datasheets, documentation, releases/changelog.
+   - For a "latest / recent / newest" question: you know the current date from your context.
+     Compare publication dates against it and open the official releases page; never present
+     an older item as the current one.
 
 ### Read pages
 
@@ -67,8 +72,9 @@ and any search backend for `web_search`.
 
 ### Answer
 
-6. If the pages do not answer the question, search again with different words, up to 3 searches,
-   one at a time.
+6. If the pages do not answer the question, refine the query (vary words, quote entities, try
+   `site:`) and search again — up to 3 searches, then stop and report what you found or what is
+   missing. Never loop unbounded.
    - A search with no result is not proof that something does not exist: the search engines may
      be rate-limiting; search again with other words or open a page that lists it.
 
