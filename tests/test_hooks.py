@@ -719,6 +719,9 @@ def test_responses_api_input_items_are_cleaned_too():
     ("Arete-27B.\n\n*Sources : page officielle des releases, fiche Hugging Face.*", "Arete-27B."),
     ("Arete-27B.\n\n---\n\n## Références\n- https://a.example", "Arete-27B."),
     ("Arete-27B.\n\n**Sources consultées** : page officielle, fiche HF, blog.", "Arete-27B."),
+    ("RTX 5080.\n\n*(Source : [NVIDIA GeForce RTX 5080](https://www.nvidia.com/x))*", "RTX 5080."),
+    ("Arete-27B.\n\n[Sources utilisées : https://nousresearch.com/arete](https://nousresearch.com/arete)",
+     "Arete-27B."),
 ])
 def test_a_sources_block_the_model_wrote_is_replaced_by_the_footer(answer, expected):
     assert gw._drop_model_sources(answer) == expected
@@ -729,6 +732,7 @@ def test_a_sources_block_the_model_wrote_is_replaced_by_the_footer(answer, expec
     "The source of the problem is the cache.\n\n- point one\n- point two",
     "Sources disagree: NVIDIA says 165 Hz, Notebookcheck 120 Hz.\n\nNVIDIA's page is the reference.",
     "Sources :\n- https://a.example",  # nothing but sources: kept rather than emptied
+    "Done.\n\n(Sources disagree on the boost clock: 2617 or 2640 MHz.)",
 ])
 def test_answers_without_a_closing_sources_block_are_untouched(answer):
     assert gw._drop_model_sources(answer) == answer

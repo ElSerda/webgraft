@@ -408,7 +408,7 @@ _SOURCE_QUALIFIERS = ("consultées", "consultés", "utilisées", "utilisés", "c
 
 
 def _is_sources_heading(line: str) -> bool:
-    words = line.strip().strip("*_#>` ").casefold()
+    words = line.strip().strip("*_#>`()[ ").casefold()  # also "*(Source : ...)*", "[Sources : url](url)"
     head = words.split(":", 1)[0].split("(", 1)[0].strip().strip("*_ ").split()
     return (len(head) == 1 and head[0] in _SOURCE_WORDS) or (
         len(head) == 2 and head[0] in _SOURCE_WORDS and head[1].strip("*_") in _SOURCE_QUALIFIERS)
