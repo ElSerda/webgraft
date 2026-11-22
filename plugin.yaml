@@ -70,3 +70,13 @@ config_schema:
     default: false
     label: Demote off-query search results
     description: "A web_search hit with no query word in its title or URL moves to the tail of the list, keeping its relative order; the backend ranking is otherwise untouched and nothing is removed. Case-folded match without diacritic folding (Noûs does not match nous), common French/English function words ignored. Targets locale noise (a common word matching an entity query) without re-scoring consensus results"
+  guard_ask:
+    type: str
+    default: "Webgraft is asking you to approve or refuse this tool call.\n\n"
+    label: Guard ask message
+    description: "Message prepended when a guarded tool goes to approval (tool_guard set to ask)"
+  guard_block:
+    type: str
+    default: "Webgraft is asking you to block this tool call.\n\n"
+    label: Guard block message
+    description: "Message prepended when a guarded tool is refused (tool_guard set to block)"
