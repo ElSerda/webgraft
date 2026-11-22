@@ -334,7 +334,7 @@ Under Settings → Plugins in Hermes Desktop, or `plugins.entries.webgraft.setti
 | Key | Default | Meaning |
 |---|---|---|
 | `show_sources` | `always` | `always`: list the opened pages under the answer. `never`: no list (with another plugin that rewrites replies, see below). Older values: `auto` means `always` |
-| `remind` | `true` | Add a short note to each user message (about 110 tokens), marked as a note and not the request: search snippets are not sources, open the pages, and open the pages a multi-URL call left out. When the message holds a URL, the note asks to open that page instead of searching |
+| `remind` | `true` | Add a note to each user message, marked as a note and not the request. First turn (about 110 tokens): search snippets are not sources, open the pages, and open the pages a multi-URL call left out; when the message holds a URL, open that page instead of searching. Later turns get a one-line form (about 70 tokens). With the skill in `skills.auto_load`, which already holds these rules, the note only says whether webgraft lists the opened pages (about 50 tokens) |
 | `one_url_per_call` | `true` | A `web_extract` call that asks for several URLs reads only the first; the result lists the others |
 | `llms_txt` | `true` | When the site's `llms.txt` lists a Markdown version of the page, read that instead of the HTML |
 | `browser` | `when_empty` | With Crawl4AI installed: open a page in its browser only when the downloaded page has no text or almost none, a page built by scripts (`when_empty`), or every page the site served, for values scripts fill in (`always`, about 4 seconds per page) |

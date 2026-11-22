@@ -26,7 +26,7 @@ config_schema:
     type: bool
     default: true
     label: Remind the model to open pages
-    description: "Adds a short reminder (about 110 tokens) to each user message: search snippets are not sources, open the pages"
+    description: "Adds a note to each user message: search snippets are not sources, open the pages (about 110 tokens on the first turn, 70 after; about 50 with the skill auto-loaded)"
   one_url_per_call:
     type: bool
     default: true

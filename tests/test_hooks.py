@@ -15,6 +15,7 @@ from _pkg import load  # noqa: E402
 gw = load()
 footer = importlib.import_module("webgraft.footer")
 REAL_HERMES_LANGUAGE = footer._hermes_language  # before the fixture below replaces it
+REAL_SKILL_AUTO_LOADED = gw._skill_auto_loaded  # idem
 
 
 def hermes_language(monkeypatch, lang):
@@ -26,6 +27,12 @@ def hermes_language(monkeypatch, lang):
 def hermes_in_french(monkeypatch):
     """These tests answer in French, with Hermes's interface in French."""
     hermes_language(monkeypatch, "fr")
+
+
+@pytest.fixture(autouse=True)
+def skill_not_auto_loaded(monkeypatch):
+    """The reminder depends on skills.auto_load; these tests start without the skill loaded."""
+    monkeypatch.setattr(gw, "_skill_auto_loaded", lambda: False)
 
 
 class FakeCtx:
@@ -569,3 +576,47 @@ def test_guard_ask_and_block_messages_are_customizable():
     hook4 = ctx4.hooks["pre_tool_call"]
     msg4 = hook4(tool_name="terminal", session_id="s1", args={"command": "ls"})
     assert isinstance(msg4, dict) and msg4["action"] == "block" and "Blocked by webgraft" in msg4["message"]
+
+
+def test_later_turns_get_the_short_reminder():
+    ctx = setup()
+    h = ctx.hooks["pre_llm_call"]
+    history = [{"role": "user", "content": "q0"}, {"role": "assistant", "content": "a0"}]
+    first = h(session_id="s1", user_message="q", conversation_history=[], is_first_turn=True)
+    later = h(session_id="s1", user_message="q", conversation_history=history, is_first_turn=False)
+    assert "If you search the web for this message" in first
+    assert later.startswith(gw.SHORT_REMINDER) and "If you search the web" not in later
+    assert "do not write a sources list" in later and len(later) < len(first)
+    url_later = h(session_id="s1", user_message="see https://example.org/a", conversation_history=history,
+                  is_first_turn=False)
+    assert url_later.startswith(gw.SHORT_URL_REMINDER)
+
+
+def test_without_is_first_turn_the_history_decides():
+    ctx = setup()
+    h = ctx.hooks["pre_llm_call"]
+    assert "If you search the web" in h(session_id="s1", user_message="q", conversation_history=[])
+    later = h(session_id="s1", user_message="q", conversation_history=[{"role": "user", "content": "q0"}])
+    assert later.startswith(gw.SHORT_REMINDER)
+
+
+def test_with_the_skill_auto_loaded_the_note_only_tells_about_the_sources(monkeypatch):
+    monkeypatch.setattr(gw, "_skill_auto_loaded", lambda: True)
+    ctx = setup()
+    out = ctx.hooks["pre_llm_call"](session_id="s1", user_message="q", is_first_turn=True)
+    assert out == gw.NOTE_PREFIX + " " + gw.FOOTER_SENTENCE
+    ctx = setup({"show_sources": "never"})
+    out = ctx.hooks["pre_llm_call"](session_id="s1", user_message="https://example.org/a", is_first_turn=True)
+    assert out == gw.NOTE_PREFIX + " " + gw.NO_FOOTER_SENTENCE
+
+
+@pytest.mark.parametrize("config, expected", [({"skills": {"auto_load": ["webgraft:webgraft"]}}, True),
+                                              ({"skills": {"auto_load": ["other"]}}, False),
+                                              ({"skills": {"auto_load": "webgraft:webgraft"}}, False),
+                                              ({}, False), (None, False)])
+def test_skill_auto_load_is_read_through_the_public_config_api(monkeypatch, config, expected):
+    module = types.ModuleType("hermes_cli.config")
+    module.load_config_readonly = lambda: config
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", module)
+    assert REAL_SKILL_AUTO_LOADED() is expected

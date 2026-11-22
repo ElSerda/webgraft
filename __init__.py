@@ -111,6 +111,19 @@ URL_REMINDER = (
     "If it cannot be read, say so; if you then search, search snippets are not sources: open the most "
     "relevant results with web_extract before answering."
 )
+# Later turns of a conversation get this short form: the full one is in the first user message.
+SHORT_REMINDER = (
+    "[webgraft note to the assistant, not part of the user's message] "
+    "Search snippets are not sources: open pages with web_extract, one URL per call."
+)
+SHORT_URL_REMINDER = (
+    "[webgraft note to the assistant, not part of the user's message] "
+    "Open the URL in the user's message with web_extract and answer from the page."
+)
+# With the skill auto-loaded, the system prompt already holds every research rule: the note only
+# says whether webgraft adds its footer, which the skill cannot know (show_sources).
+NOTE_PREFIX = "[webgraft note to the assistant, not part of the user's message]"
+SKILL_NAME = "webgraft:webgraft"
 # Said only when webgraft will add its footer: with show_sources off, or stepping aside for another
 # plugin that rewrites replies, the model has to cite its pages itself. A URL the user asks for is
 # still written.
@@ -302,11 +315,29 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
     parts = []
     if _setting("remind", True):
         footer = FOOTER_SENTENCE if _footer_on() else NO_FOOTER_SENTENCE
-        parts.append((URL_REMINDER if _has_url(_text_of(user_message)) else REMINDER) + " " + footer)
+        has_url = _has_url(_text_of(user_message))
+        if _skill_auto_loaded():
+            reminder = NOTE_PREFIX
+        elif _.get("is_first_turn", not conversation_history):
+            reminder = URL_REMINDER if has_url else REMINDER
+        else:
+            reminder = SHORT_URL_REMINDER if has_url else SHORT_REMINDER
+        parts.append(reminder + " " + footer)
     heading = _footer_in_history(conversation_history, session_id)
     if heading and compat.sources_mode(_setting("show_sources", "always")) != "never":
         parts.append(FOOTER_NOTE.format(heading=heading))
     return " ".join(parts) or None
+
+
+def _skill_auto_loaded() -> bool:
+    """Whether webgraft's skill is in skills.auto_load, so in every system prompt (read through
+    Hermes's public config API, each turn: a config edit applies without a restart)."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        auto = ((load_config_readonly() or {}).get("skills") or {}).get("auto_load") or []
+    except Exception:  # noqa: BLE001 - unknown: keep the full reminder
+        return False
+    return isinstance(auto, list) and SKILL_NAME in auto
 
 
 def _url_of(item: Any) -> Optional[str]:
