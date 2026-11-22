@@ -279,7 +279,7 @@ Then `setup`:
 3. offers **Crawl4AI**, which is optional;
 4. offers **local OCR** for scanned PDFs (RapidOCR), which is optional;
 5. offers to raise Hermes's `web.extract_char_limit` to 30,000 (off unless you say yes; see [Widening it](#widening-it-optional-in-setup));
-6. offers to auto-load the bundled skill `webgraft:webgraft` (it tells the model to open pages instead of answering from snippets, one URL per call; about 600 tokens per session);
+6. offers to auto-load the bundled skill `webgraft:webgraft` (it tells the model to open pages instead of answering from snippets, one URL per call; about 750 tokens in each new session);
 7. offers to keep `tool_guard` on Kanban workers (`tool_guard_kanban`, kept on unless you say no: off, a worker runs unguarded, see [Prompt injection](#prompt-injection));
 8. tests one real page and one missing page.
 

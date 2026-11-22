@@ -517,7 +517,7 @@ def step_char_limit(args, s: dict, interactive: bool) -> None:
 def step_skill(args, interactive: bool) -> None:
     header("6. Research skill")
     info(f"{SKILL} tells the model to open pages instead of answering from search snippets,")
-    info("one URL per web_extract call. Auto-loading puts it in every new session (about 600 tokens).")
+    info("one URL per web_extract call. Auto-loading puts it in every new session (about 750 tokens).")
     current = ((_config().get("skills") or {}).get("auto_load")) or []
     if not isinstance(current, list):
         current = []
@@ -528,7 +528,7 @@ def step_skill(args, interactive: bool) -> None:
     wanted = args.skill if args.skill is not None else _confirm(
         f"Auto-load {SKILL}?", True, interactive,
         "The skill makes the model open pages instead of answering from search snippets.\n"
-        "It is added to every new session (about 600 tokens).")
+        "It is added to every new session (about 750 tokens).")
     if not wanted:
         warn(f"Skipped. Load it by hand with /skill {SKILL}.")
         return

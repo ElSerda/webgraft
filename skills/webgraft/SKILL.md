@@ -1,7 +1,7 @@
 ---
 name: webgraft
 description: "Answer web questions from opened pages, not snippets."
-version: 1.5.0
+version: 1.6.0
 author: ElSerda
 license: MIT
 platforms: [linux, windows]
@@ -14,85 +14,47 @@ metadata:
 
 # Web Research Skill
 
-Answer from pages you actually read: search to find them, `web_extract` to read them.
-
-The webgraft plugin usually appends the pages you opened under your answer; its note on the user's
-message says whether it does. When it does, do not write a sources list yourself; when it does
-not, end your answer with the URLs of the pages you used.
-
-For a document or report with numbered inline citations, use `grounded-citations` instead.
+Answer from pages you opened: `web_search` finds them, `web_extract` reads them (PDFs too).
+When webgraft's note on the user's message says it lists the pages you opened under your answer,
+do not cite or name your sources yourself, not even in one sentence; when it does not, end your
+answer with the URLs you used. For numbered inline citations, use `grounded-citations` instead.
 
 ## When to Use
 
-- The user asks to search, find, check or compare something.
-- The answer depends on facts that change or that you cannot be sure of: specs, prices,
-  versions, news, dates.
+Searching, checking or comparing facts that change or that you are unsure of: specs, prices,
+versions, news, dates.
 
 ## Prerequisites
 
-The webgraft plugin, with `web.extract_backend: webgraft` (run `hermes webgraft setup`)
-and any search backend for `web_search`.
+The webgraft plugin as `web.extract_backend` (`hermes webgraft setup`).
 
 ## Quick Reference
 
-| Step | Tool |
-|---|---|
-| Find candidate pages | `web_search` with a precise query |
-| Read one page or PDF | `web_extract` with one URL |
-| Read a long saved result | `read_file` on the path in `<persisted-output>` |
+`web_search` to find pages, `web_extract` with one URL per call to read them, `read_file` for a
+`<persisted-output>` preview.
 
 ## Procedure
 
-### Find pages
-
-1. Call `web_search` for exactly what the user asked.
-   - Keep the user's question and named entities verbatim. Never translate or substitute a
-     name: "Nous Research" is a company — search `"Nous Research"`, not "Notre Recherche".
-   - Quoting multi-word entities, searching in English for technical topics, and `site:` for
-     official sources change the syntax, never the substance or the names.
-
-2. Pick the 2 or 3 most relevant results.
-   - Prefer official sources: maker pages, datasheets, documentation, releases/changelog.
-   - For a "latest / recent / newest" question: you know the current date from your context.
-     Compare publication dates against it and open the official releases page; never present
-     an older item as the current one.
-
-### Read pages
-
-3. Call `web_extract` with one URL per call, never several URLs together.
-   - It reads PDFs too, so open datasheets directly.
-   - If you pass several URLs, only the first is read and `webgraft_note` lists the others:
-     open the ones you still need, each in its own call.
-
-4. If a result returns `error`, open the next result.
-   - One failure never ends the research.
-
-5. A page's result ends with "Links on this page": to open a product, an article or a section it
-   names, take its URL there instead of searching for it.
-
-### Answer
-
-6. If the pages do not answer the question, refine the query (vary words, quote entities, try
-   `site:`) and search again — up to 3 searches, then stop and report what you found or what is
-   missing. Never loop unbounded.
-   - A search with no result is not proof that something does not exist: the search engines may
-     be rate-limiting; search again with other words or open a page that lists it.
-
-7. Answer using only facts found in the pages you opened.
-   - Keep numbers and units as written.
+1. Search for exactly what the user asked. Keep names verbatim, never translate them
+   ("Nous Research" stays `"Nous Research"`). Quotes, English for technical topics and `site:`
+   change the syntax, never the names.
+2. Open the 2 or 3 most relevant results, official sources first (maker pages, datasheets,
+   docs, releases). For "latest / newest": compare publication dates with the current date in
+   your context and open the official releases page; never present an older item as current.
+3. `web_extract` one URL per call. If its `webgraft_note` lists pages it did not open, open the
+   ones you still need, each in its own call. To follow a page's "Links on this page", take the
+   URL there instead of searching.
+4. A result with `error`: open the next result. No answer in the pages: refine the query and
+   search again, at most 3 searches, then report what you found and what is missing.
+5. Answer only with facts from the pages you opened, numbers and units as written.
 
 ## Pitfalls
 
-- Search snippets are not sources, even when they hold numbers. Open the page.
-- Never say a tool cannot reach the information before trying it.
-- A fact you did not find stays missing: say so.
-  - A fact from memory is marked `(from memory, not verified)`.
-- Marketing pages often omit specs. Look for the datasheet or a detailed review.
-- Reseller and review pages can copy the wrong values.
-  - When sources disagree, give both values and prefer the maker's page.
-- A `<persisted-output>` result is only a preview. Read the saved file with `read_file`.
+- Search snippets are not sources, even when they hold numbers.
+- An empty search is not proof something does not exist: the engines may be rate-limiting.
+- When sources disagree, give both values and prefer the maker's page.
+- A fact you did not find stays missing; one from memory is marked `(from memory, not verified)`.
 
 ## Verification
 
-Before answering, check that you called `web_extract` and that every value you give appears in
-the pages you opened.
+Every value you give appears in a page you opened with `web_extract`.
