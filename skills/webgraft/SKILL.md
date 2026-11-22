@@ -15,9 +15,10 @@ metadata:
 # Web Research Skill
 
 Answer from pages you opened: `web_search` finds them, `web_extract` reads them (PDFs too).
-When webgraft's note on the user's message says it lists the pages you opened under your answer,
-do not cite or name your sources yourself, not even in one sentence; when it does not, end your
-answer with the URLs you used. For numbered inline citations, use `grounded-citations` instead.
+Do not cite or name your sources yourself, not even in one sentence: webgraft shows the pages you
+opened under your answer (a URL the user asks for is fine). Only if webgraft's note on the user's
+message asks for them, end your answer with the URLs you used. For numbered inline citations, use
+`grounded-citations` instead.
 
 ## When to Use
 

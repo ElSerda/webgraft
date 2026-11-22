@@ -620,3 +620,123 @@ def test_skill_auto_load_is_read_through_the_public_config_api(monkeypatch, conf
     monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
     monkeypatch.setitem(sys.modules, "hermes_cli.config", module)
     assert REAL_SKILL_AUTO_LOADED() is expected
+
+
+class FakeCtxWithMiddleware(FakeCtx):
+    def __init__(self, settings=None):
+        super().__init__(settings)
+        self.middleware = {}
+
+    def register_middleware(self, kind, fn):
+        self.middleware[kind] = fn
+
+
+def setup_mw(settings=None):
+    gw._turns.clear()
+    gw._appended_footers.clear()
+    ctx = FakeCtxWithMiddleware(settings)
+    gw.register(ctx)
+    return ctx
+
+
+def test_with_the_middleware_and_the_skill_nothing_is_said(monkeypatch):
+    ctx = setup_mw()
+    h = ctx.hooks["pre_llm_call"]
+    monkeypatch.setattr(gw, "_skill_auto_loaded", lambda: True)
+    assert h(session_id="s1", user_message="q", is_first_turn=True) is None
+    assert h(session_id="s1", user_message="q", conversation_history=[{"role": "user", "content": "q0"}],
+             is_first_turn=False) is None
+
+
+def test_with_the_middleware_but_no_skill_the_note_keeps_the_sources_sentence():
+    ctx = setup_mw()
+    h = ctx.hooks["pre_llm_call"]
+    first = h(session_id="s1", user_message="q", is_first_turn=True)
+    assert first == gw.REMINDER + " " + gw.FOOTER_SENTENCE
+    later = h(session_id="s1", user_message="q", conversation_history=[{"role": "user", "content": "q0"}],
+              is_first_turn=False)
+    assert later == gw.SHORT_REMINDER + " " + gw.FOOTER_SENTENCE
+
+
+def test_with_the_middleware_and_no_footer_the_note_still_asks_for_urls(monkeypatch):
+    monkeypatch.setattr(gw, "_skill_auto_loaded", lambda: True)
+    ctx = setup_mw({"show_sources": "never"})
+    out = ctx.hooks["pre_llm_call"](session_id="s1", user_message="q", is_first_turn=True)
+    assert out == gw.NOTE_PREFIX + " " + gw.NO_FOOTER_SENTENCE
+
+
+def test_with_the_middleware_the_earlier_footer_note_is_gone():
+    ctx = setup_mw()
+    answer = run_turn(ctx, "La formule Plus coûte 20 $.", [("web_extract", extract_result(PAGE))])
+    history = [{"role": "user", "content": "q"}, {"role": "assistant", "content": answer}]
+    out = ctx.hooks["pre_llm_call"](session_id="s1", user_message="q2", conversation_history=history,
+                                    is_first_turn=False)
+    assert "were added by webgraft" not in out
+
+
+def test_footers_are_kept_out_of_the_request_the_model_gets():
+    ctx = setup_mw()
+    answer = run_turn(ctx, "La formule Plus coûte 20 $.", [("web_extract", extract_result(PAGE))])
+    assert "Sources (pages ouvertes)" in answer
+    request = {"model": "m", "messages": [
+        {"role": "system", "content": "sys"}, {"role": "user", "content": "q"},
+        {"role": "assistant", "content": answer},
+        {"role": "assistant", "content": [{"type": "text", "text": answer, "cache_control": {"type": "ephemeral"}}]},
+        {"role": "user", "content": "q2"}]}
+    mw = ctx.middleware["llm_request"]
+    out = mw(request=request, session_id="s1")
+    msgs = out["request"]["messages"]
+    assert msgs[2]["content"] == "La formule Plus coûte 20 $."
+    assert msgs[3]["content"][0] == {"type": "text", "text": "La formule Plus coûte 20 $.",
+                                     "cache_control": {"type": "ephemeral"}}
+    assert msgs[0] == request["messages"][0] and msgs[4] == request["messages"][4]
+    assert "Sources" in request["messages"][2]["content"]  # the original request is not mutated
+    assert mw(request=request, session_id="s1") == out  # same input, same output: the cache keeps hitting
+    assert mw(request=request, session_id="other") is None  # another conversation's footers are not known
+
+
+def test_the_middleware_leaves_a_request_without_footers_alone():
+    ctx = setup_mw()
+    run_turn(ctx, "La formule Plus coûte 20 $.", [("web_extract", extract_result(PAGE))])
+    request = {"messages": [{"role": "assistant", "content": "plain answer"}]}
+    assert ctx.middleware["llm_request"](request=request, session_id="s1") is None
+    assert ctx.middleware["llm_request"](request="not a dict", session_id="s1") is None
+
+
+def test_responses_api_input_items_are_cleaned_too():
+    ctx = setup_mw()
+    answer = run_turn(ctx, "Réponse.", [("web_extract", extract_result(PAGE))])
+    request = {"input": [{"role": "assistant", "content": [{"type": "output_text", "text": answer}]}]}
+    out = ctx.middleware["llm_request"](request=request, session_id="s1")
+    assert out["request"]["input"][0]["content"][0]["text"] == "Réponse."
+
+
+@pytest.mark.parametrize("answer, expected", [
+    ("Arete-27B.\n\nSources (pages ouvertes) :\n- Releases: https://nousresearch.com/releases\n- HF: https://hf.co/x",
+     "Arete-27B."),
+    ("Arete-27B.\n\n**Sources :**\n1. page officielle\n2. fiche Hugging Face", "Arete-27B."),
+    ("Arete-27B.\n\nSource : <https://openrouter.ai/nousresearch>", "Arete-27B."),
+    ("Arete-27B.\n\n*Sources : page officielle des releases, fiche Hugging Face.*", "Arete-27B."),
+    ("Arete-27B.\n\n---\n\n## Références\n- https://a.example", "Arete-27B."),
+    ("Arete-27B.\n\n**Sources consultées** : page officielle, fiche HF, blog.", "Arete-27B."),
+])
+def test_a_sources_block_the_model_wrote_is_replaced_by_the_footer(answer, expected):
+    assert gw._drop_model_sources(answer) == expected
+
+
+@pytest.mark.parametrize("answer", [
+    "Plain answer with no sources.",
+    "The source of the problem is the cache.\n\n- point one\n- point two",
+    "Sources disagree: NVIDIA says 165 Hz, Notebookcheck 120 Hz.\n\nNVIDIA's page is the reference.",
+    "Sources :\n- https://a.example",  # nothing but sources: kept rather than emptied
+])
+def test_answers_without_a_closing_sources_block_are_untouched(answer):
+    assert gw._drop_model_sources(answer) == answer
+
+
+def test_the_footer_replaces_the_models_own_list_in_the_reply():
+    ctx = setup_mw()
+    answer = "La formule Plus coûte 20 $.\n\nSources :\n- https://portal.example/cloud"
+    out = run_turn(ctx, answer, [("web_extract", extract_result(PAGE))])
+    assert out.startswith("La formule Plus coûte 20 $.\n\nSources (pages ouvertes)")
+    assert out.count("https://portal.example/cloud") == 1

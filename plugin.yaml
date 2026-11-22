@@ -13,6 +13,8 @@ provides_hooks:
   - post_tool_call
   - transform_tool_result
   - transform_llm_output
+provides_middleware:
+  - llm_request
 provides_web_providers:
   - webgraft
 config_schema:

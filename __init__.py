@@ -18,6 +18,7 @@ Hooks only, no extra model call:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -26,6 +27,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import compat, footer
+
+logger = logging.getLogger(__name__)
 
 # The footer lists the pages web_extract returned in the current turn, from the tool results: no
 # page text is kept. Bounded records of turns in progress.
@@ -313,20 +316,128 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
             while len(_turns) > MAX_SESSIONS:
                 _turns.popitem(last=False)
     parts = []
+    footer_on = _footer_on()
+    # With the footer kept out of the model's context (_strip_footers), the model never sees one to
+    # copy: with the skill auto-loaded, nothing about sources is said while webgraft adds it, as the
+    # API providers do with their citations. Without the middleware (an older core), the footer
+    # sentence and the note about earlier footers stay.
+    skill = _skill_auto_loaded()
+    # The skill says not to list sources; without it in the prompt, the note has to (seen live: a
+    # model told nothing wrote its own list, which the footer then had to replace).
+    hidden = footer_on and _footers_hidden and skill
     if _setting("remind", True):
-        footer = FOOTER_SENTENCE if _footer_on() else NO_FOOTER_SENTENCE
         has_url = _has_url(_text_of(user_message))
-        if _skill_auto_loaded():
-            reminder = NOTE_PREFIX
+        if skill:
+            reminder = ""
         elif _.get("is_first_turn", not conversation_history):
             reminder = URL_REMINDER if has_url else REMINDER
         else:
             reminder = SHORT_URL_REMINDER if has_url else SHORT_REMINDER
-        parts.append(reminder + " " + footer)
-    heading = _footer_in_history(conversation_history, session_id)
-    if heading and compat.sources_mode(_setting("show_sources", "always")) != "never":
-        parts.append(FOOTER_NOTE.format(heading=heading))
+        sources = "" if hidden else (FOOTER_SENTENCE if footer_on else NO_FOOTER_SENTENCE)
+        if reminder or sources:
+            parts.append(" ".join(s for s in (reminder or NOTE_PREFIX, sources) if s))
+    if not _footers_hidden:
+        heading = _footer_in_history(conversation_history, session_id)
+        if heading and footer_on:
+            parts.append(FOOTER_NOTE.format(heading=heading))
     return " ".join(parts) or None
+
+
+# Set by register() when the core offers llm_request middleware: footers are then removed from what
+# the model reads (the user still sees them in the conversation).
+_footers_hidden = False
+
+
+def _without_footers(text: str, footers: list[str]) -> str:
+    """*text* with every footer webgraft recorded for this conversation removed, exactly as appended
+    ("\n\n" + footer): the same input always gives the same output, so the prompt prefix stays
+    byte-stable across turns and the provider's cache keeps hitting."""
+    for f in footers:
+        if f:
+            text = text.replace("\n\n" + f, "")
+    return text
+
+
+def _strip_footers(**kwargs: Any) -> Optional[dict]:
+    """llm_request middleware: the request the provider gets has no webgraft footer under earlier
+    answers. The footer is for the user; the model already has the URLs in its own tool calls, and a
+    footer it can see is one it copies (seen with a large cloud model despite a note, 3 of 5 runs)."""
+    request = kwargs.get("request")
+    footers = _recorded_footers(str(kwargs.get("session_id") or ""))
+    if not isinstance(request, dict) or not footers:
+        return None
+    changed = False
+    out = dict(request)
+    for key in ("messages", "input"):  # chat completions / Anthropic messages, Responses API input
+        items = request.get(key)
+        if not isinstance(items, list):
+            continue
+        new_items = []
+        for item in items:
+            if isinstance(item, dict) and item.get("role") == "assistant":
+                content = item.get("content")
+                if isinstance(content, str):
+                    stripped = _without_footers(content, footers)
+                    if stripped != content:
+                        item, changed = {**item, "content": stripped}, True
+                elif isinstance(content, list):
+                    blocks = []
+                    for block in content:
+                        if isinstance(block, dict) and isinstance(block.get("text"), str):
+                            stripped = _without_footers(block["text"], footers)
+                            if stripped != block["text"]:
+                                block, changed = {**block, "text": stripped}, True
+                        blocks.append(block)
+                    item = {**item, "content": blocks}
+            new_items.append(item)
+        out[key] = new_items
+    if not changed:
+        return None
+    return {"request": out, "source": "webgraft", "reason": "footers kept out of the model's context"}
+
+
+# A closing block the model wrote itself: a "Sources" heading (or a one-line "Source: ..."), then
+# only list items, links or blank lines up to the end. webgraft's footer replaces it: its list holds
+# only the pages really opened. Nothing above that block is touched.
+_SOURCE_WORDS = ("sources", "source", "références", "référence", "references", "reference")
+_LIST_MARKS = ("- ", "* ", "• ", "+ ")
+
+
+_SOURCE_QUALIFIERS = ("consultées", "consultés", "utilisées", "utilisés", "citées", "principales",
+                      "ouvertes", "used", "consulted", "cited", "opened")
+
+
+def _is_sources_heading(line: str) -> bool:
+    words = line.strip().strip("*_#>` ").casefold()
+    head = words.split(":", 1)[0].split("(", 1)[0].strip().strip("*_ ").split()
+    return (len(head) == 1 and head[0] in _SOURCE_WORDS) or (
+        len(head) == 2 and head[0] in _SOURCE_WORDS and head[1].strip("*_") in _SOURCE_QUALIFIERS)
+
+
+def _is_list_or_link(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return True
+    if s.startswith(_LIST_MARKS) or "http://" in s or "https://" in s:
+        return True
+    number, _, rest = s.partition(". ")
+    return number.isdigit() and bool(rest)
+
+
+def _drop_model_sources(text: str) -> str:
+    """*text* without a sources block the model closed it with (see above); unchanged otherwise."""
+    lines = text.rstrip().split("\n")
+    i = len(lines) - 1
+    while i >= 0 and _is_list_or_link(lines[i]) and not _is_sources_heading(lines[i]):
+        i -= 1
+    if i < 0 or not _is_sources_heading(lines[i]):
+        return text
+    if i == len(lines) - 1 and len(lines[i]) > 300:  # a long closing sentence, not a sources line
+        return text
+    kept = lines[:i]
+    while kept and kept[-1].strip() in ("", "---", "***", "___"):
+        kept.pop()
+    return "\n".join(kept) if kept else text
 
 
 def _skill_auto_loaded() -> bool:
@@ -1517,7 +1628,12 @@ def _append_footer(response_text: str = "", session_id: str = "", **_: Any) -> O
     if not text:
         return None
     _record_footer(session_id, text)
-    return f"{response_text}\n\n{text}"
+    answer = _drop_model_sources(response_text)
+    if answer != response_text:
+        # The reply changes before the footer: a streamed reply is then printed again in full by the
+        # classic CLI (it prints only the added part when the rewrite starts with what it streamed).
+        logger.info("webgraft: replaced a sources list the model wrote with the footer (session %s)", session_id)
+    return f"{answer}\n\n{text}"
 
 
 def _frontmatter(path: Path) -> dict:
@@ -1557,6 +1673,10 @@ def register(ctx) -> None:
     ctx.register_hook("post_tool_call", _record_tool)
     ctx.register_hook("transform_tool_result", _annotate)
     ctx.register_hook("transform_llm_output", _append_footer)
+    global _footers_hidden
+    _footers_hidden = hasattr(ctx, "register_middleware")
+    if _footers_hidden:
+        ctx.register_middleware("llm_request", _strip_footers)
     skills = Path(__file__).parent / "skills"
     if hasattr(ctx, "register_skill") and skills.is_dir():
         for child in sorted(skills.iterdir()):

@@ -87,6 +87,12 @@ CONTRACTS = [
      "the webgraft subcommand wires into the local CLI parser with it",
      "hermes_cli/plugins_context.py",
      [r"def register_cli_command", r"handler_fn", r"description"]),
+    ("llm-request-middleware",
+     "register_middleware('llm_request') exists and its {'request': ...} return replaces the "
+     "provider kwargs — webgraft removes its footers from earlier answers there, so the model "
+     "never sees one to copy (without it, the old notes about sources come back)",
+     "hermes_cli/middleware.py",
+     [r'LLM_REQUEST_MIDDLEWARE = "llm_request"', r"def apply_llm_request_middleware"]),
     ("provider-registration",
      "register_web_search_provider exists — ONE registration serves both backends: "
      "WebGraftProvider implements the unified interface, web.extract_backend resolves "
