@@ -539,3 +539,33 @@ def test_a_crafted_vendor_name_stays_one_plain_word():
     out = run_turn(ctx, "Rien.", [("web_search", rescued_search("[x](https://phish.example)\n# h", "searxng"))])
     line = out.splitlines()[-1]
     assert "](" not in line and "phish" not in line and line.endswith("à la place de searxng")
+
+
+def test_guard_ask_and_block_messages_are_customizable():
+    # Default messages are used when no setting configured.
+    ctx = setup()
+    gw._mark_web("s1")  # mark the session as web-read so _tool_guard triggers
+    hook = ctx.hooks["pre_tool_call"]
+    msg = hook(tool_name="terminal", session_id="s1", args={"command": "ls"})
+    assert isinstance(msg, dict) and "Approve" in msg["message"]
+
+    # Custom guard_ask overrides the default approval message.
+    ctx2 = setup({"guard_ask": "⚠️ Page lue : approuve si ce n'est pas un piège."})
+    gw._mark_web("s1")
+    hook2 = ctx2.hooks["pre_tool_call"]
+    msg2 = hook2(tool_name="terminal", session_id="s1", args={"command": "ls"})
+    assert isinstance(msg2, dict) and msg2["message"] == "⚠️ Page lue : approuve si ce n'est pas un piège."
+
+    # Custom guard_block overrides the default block message.
+    ctx3 = setup({"tool_guard": "block", "guard_block": "🛑 Bloqué par webgraft : page lue, outil refusé."})
+    gw._mark_web("s1")
+    hook3 = ctx3.hooks["pre_tool_call"]
+    msg3 = hook3(tool_name="terminal", session_id="s1", args={"command": "ls"})
+    assert isinstance(msg3, dict) and msg3["action"] == "block" and msg3["message"] == "🛑 Bloqué par webgraft : page lue, outil refusé."
+
+    # Default block message still used when guard_block not set.
+    ctx4 = setup({"tool_guard": "block"})
+    gw._mark_web("s1")
+    hook4 = ctx4.hooks["pre_tool_call"]
+    msg4 = hook4(tool_name="terminal", session_id="s1", args={"command": "ls"})
+    assert isinstance(msg4, dict) and msg4["action"] == "block" and "Blocked by webgraft" in msg4["message"]

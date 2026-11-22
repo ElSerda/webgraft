@@ -443,6 +443,22 @@ GUARD_BLOCK = ("Blocked by webgraft: this conversation has read web content, and
                "can do it themselves or change tool_guard.")
 
 
+def _guard_ask_message() -> str:
+    """The approval message shown in the GUI when webgraft guards a tool (fallback to default)."""
+    val = _setting("guard_ask", None)
+    if isinstance(val, str):
+        return val
+    return GUARD_ASK
+
+
+def _guard_block_message() -> str:
+    """The block message shown in the GUI when webgraft blocks a tool (fallback to default)."""
+    val = _setting("guard_block", None)
+    if isinstance(val, str):
+        return val
+    return GUARD_BLOCK
+
+
 def _args_dict(args: Any) -> dict:
     """A call's arguments as a dict (Hermes's history keeps them as a JSON string)."""
     if isinstance(args, str):
@@ -1091,13 +1107,13 @@ def _tool_guard(tool_name: str, session_id: str, args: Any = None) -> Optional[d
         if where:
             hint = KANBAN_READ_HINT.format(where="; ".join(where)) + hint
     if mode == "block":
-        return {"action": "block", "message": GUARD_BLOCK + hint}
+        return {"action": "block", "message": _guard_block_message() + hint}
     what = tool_name or "this tool"
     if tool_name in PATH_READ_TOOLS:
         # The path comes from the model, maybe from a page: no control characters in the prompt.
         path = "".join(ch if ch.isprintable() else " " for ch in (_read_path(tool_name, args) or "the current folder"))[:300]
         what = f"{tool_name} on {path}"
-    return {"action": "approve", "message": GUARD_ASK.format(tool=what) + hint,
+    return {"action": "approve", "message": _guard_ask_message().format(tool=what) + hint,
             "rule_key": f"webgraft:tool_guard:{tool_name}"}
 
 
@@ -1204,8 +1220,8 @@ def _guard_tool(tool_name: str = "", args: Any = None, session_id: str = "", too
         directive = _tool_guard(tool_name, conversation, args)
         if wrapped and directive and directive.get("action") == "modify":
             # Hermes would apply the change to the wrapper's arguments, which the tool never sees: ask.
-            directive = ({"action": "block", "message": GUARD_BLOCK} if guard_mode() == "block" else
-                         {"action": "approve", "message": GUARD_ASK.format(tool=tool_name),
+            directive = ({"action": "block", "message": _guard_block_message()} if guard_mode() == "block" else
+                         {"action": "approve", "message": _guard_ask_message().format(tool=tool_name),
                           "rule_key": f"webgraft:tool_guard:{tool_name}"})
     # The tools a script runs (execute_code) reach pre_tool_call only: Hermes leaves the post event to
     # the outer call (model_tools.suppress_post_tool_call_hook). Seen live: a script's web_extract never
