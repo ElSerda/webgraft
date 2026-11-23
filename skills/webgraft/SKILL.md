@@ -1,7 +1,7 @@
 ---
 name: webgraft
 description: "Answer web questions from opened pages, not snippets."
-version: 1.6.0
+version: 1.6.1
 author: ElSerda
 license: MIT
 platforms: [linux, windows]
@@ -45,8 +45,10 @@ The webgraft plugin as `web.extract_backend` (`hermes webgraft setup`).
 3. `web_extract` one URL per call. If its `webgraft_note` lists pages it did not open, open the
    ones you still need, each in its own call. To follow a page's "Links on this page", take the
    URL there instead of searching.
-4. A result with `error`: open the next result. No answer in the pages: refine the query and
-   search again, at most 3 searches, then report what you found and what is missing.
+4. A result with `error`: open the next result. Three searches are usually enough: after the
+   third, search again only if no page you opened answers the question. Otherwise answer now with
+   what the pages say and name what stays uncertain; do not keep searching to confirm what a page
+   already states.
 5. Answer only with facts from the pages you opened, numbers and units as written.
 
 ## Pitfalls
