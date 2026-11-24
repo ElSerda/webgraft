@@ -1,0 +1,32 @@
+name: webgraft
+title: WebGraft
+repo: https://github.com/ElSerda/webgraft
+sha: "295bddf4a2c00ef177a1c1c9df29c1575690407f"
+description: |
+  Reads web pages and documents on this machine for web_extract, and ends each answer with the pages it really opened, as clickable sources kept out of the model's context.
+
+  - Reading: plain HTTP first, Hermes's own Chromium when a page has no text; PDF, Office and scanned PDFs (OCR)
+  - Guard: once a conversation has read the web, asks before risky tools (terminal, code, file writes, messages) and before Hermes's keyless rescue sends a page or a search to an outside service
+  - Kanban: work inside the card's workspace stays free
+
+  Full list: "What it does, for review" in the README.
+maintainer: ElSerda
+tier: community
+category: web
+requires_hermes: ">=0.22.6"
+docs_url: https://github.com/ElSerda/webgraft#readme
+version: "0.3.3"
+platforms:
+  - linux
+  - windows
+capabilities:
+  provides_tools: []
+  provides_hooks:
+    - pre_llm_call
+    - pre_tool_call
+    - post_tool_call
+    - transform_tool_result
+    - transform_llm_output
+  provides_middleware:
+    - llm_request
+  requires_env: []
