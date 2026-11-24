@@ -604,10 +604,10 @@ def test_with_the_skill_auto_loaded_the_note_only_tells_about_the_sources(monkey
     monkeypatch.setattr(gw, "_skill_auto_loaded", lambda: True)
     ctx = setup()
     out = ctx.hooks["pre_llm_call"](session_id="s1", user_message="q", is_first_turn=True)
-    assert out == gw.NOTE_PREFIX + " " + gw.FOOTER_SENTENCE
+    assert out == gw.NOTE_PREFIX + " " + gw._today() + " " + gw.FOOTER_SENTENCE
     ctx = setup({"show_sources": "never"})
     out = ctx.hooks["pre_llm_call"](session_id="s1", user_message="https://example.org/a", is_first_turn=True)
-    assert out == gw.NOTE_PREFIX + " " + gw.NO_FOOTER_SENTENCE
+    assert out == gw.NOTE_PREFIX + " " + gw._today() + " " + gw.NO_FOOTER_SENTENCE
 
 
 @pytest.mark.parametrize("config, expected", [({"skills": {"auto_load": ["webgraft:webgraft"]}}, True),
@@ -639,30 +639,33 @@ def setup_mw(settings=None):
     return ctx
 
 
-def test_with_the_middleware_and_the_skill_nothing_is_said(monkeypatch):
+def test_with_the_middleware_and_the_skill_only_the_date_is_said(monkeypatch):
     ctx = setup_mw()
     h = ctx.hooks["pre_llm_call"]
     monkeypatch.setattr(gw, "_skill_auto_loaded", lambda: True)
-    assert h(session_id="s1", user_message="q", is_first_turn=True) is None
+    date_only = gw.NOTE_PREFIX + " " + gw._today()
+    assert h(session_id="s1", user_message="q", is_first_turn=True) == date_only
     assert h(session_id="s1", user_message="q", conversation_history=[{"role": "user", "content": "q0"}],
-             is_first_turn=False) is None
+             is_first_turn=False) == date_only
+    ctx = setup_mw({"remind": False})
+    assert ctx.hooks["pre_llm_call"](session_id="s1", user_message="q", is_first_turn=True) is None
 
 
 def test_with_the_middleware_but_no_skill_the_note_keeps_the_sources_sentence():
     ctx = setup_mw()
     h = ctx.hooks["pre_llm_call"]
     first = h(session_id="s1", user_message="q", is_first_turn=True)
-    assert first == gw.REMINDER + " " + gw.FOOTER_SENTENCE
+    assert first == gw.REMINDER + " " + gw._today() + " " + gw.FOOTER_SENTENCE
     later = h(session_id="s1", user_message="q", conversation_history=[{"role": "user", "content": "q0"}],
               is_first_turn=False)
-    assert later == gw.SHORT_REMINDER + " " + gw.FOOTER_SENTENCE
+    assert later == gw.SHORT_REMINDER + " " + gw._today() + " " + gw.FOOTER_SENTENCE
 
 
 def test_with_the_middleware_and_no_footer_the_note_still_asks_for_urls(monkeypatch):
     monkeypatch.setattr(gw, "_skill_auto_loaded", lambda: True)
     ctx = setup_mw({"show_sources": "never"})
     out = ctx.hooks["pre_llm_call"](session_id="s1", user_message="q", is_first_turn=True)
-    assert out == gw.NOTE_PREFIX + " " + gw.NO_FOOTER_SENTENCE
+    assert out == gw.NOTE_PREFIX + " " + gw._today() + " " + gw.NO_FOOTER_SENTENCE
 
 
 def test_with_the_middleware_the_earlier_footer_note_is_gone():
@@ -727,6 +730,31 @@ def test_a_sources_block_the_model_wrote_is_replaced_by_the_footer(answer, expec
     assert gw._drop_model_sources(answer) == expected
 
 
+# Seen with LFM3-1.7B (2026-11-24): the list, then a closing note under it; one URL was never opened.
+@pytest.mark.parametrize("answer, expected", [
+    ("Arete-27B.\n\n**Source links:**\n- Releases page: https://nousresearch.tech/releases\n"
+     "- Blog post: https://nousresearch.com/arete\n\nOne gap: the output limit is not stated.",
+     "Arete-27B.\n\nOne gap: the output limit is not stated."),
+    ("Arete-27B.\n\nSources consultées :\n- https://benchgen.com/x (licence)\n- https://huggingface.co/y\n\n"
+     "Note : c'est le plus récent.", "Arete-27B.\n\nNote : c'est le plus récent."),
+    ("Arete-27B.\n\n*Source : https://nousresearch.com/releases et https://huggingface.co/x*\n\n| a | b |\n|---|---|",
+     "Arete-27B.\n\n| a | b |\n|---|---|"),
+    ("Arete-27B.\n\n**Sources vérifiées :**\n- https://a.example\n\nFin.\n\nSources :\n- https://b.example",
+     "Arete-27B.\n\nFin."),
+])
+def test_a_sources_block_followed_by_a_note_is_dropped_too(answer, expected):
+    assert gw._drop_model_sources(answer) == expected
+
+
+@pytest.mark.parametrize("answer", [
+    "Arete-27B.\n\n**Sources vérifiées :**\n- page officielle\n- fiche HF\n\nNote : à confirmer.",  # names, no links
+    "Intro.\n\nSources disagree:\n- NVIDIA: 960 GB/s\n- a forum: 896 GB/s\n\nNVIDIA is the reference.",
+    "Intro.\n\nSource : la page officielle indique 360 W.\n\nFin.",  # a sentence, no link
+])
+def test_a_sources_heading_above_text_without_links_is_kept(answer):
+    assert gw._drop_model_sources(answer) == answer
+
+
 @pytest.mark.parametrize("answer", [
     "Plain answer with no sources.",
     "The source of the problem is the cache.\n\n- point one\n- point two",
@@ -744,3 +772,27 @@ def test_the_footer_replaces_the_models_own_list_in_the_reply():
     out = run_turn(ctx, answer, [("web_extract", extract_result(PAGE))])
     assert out.startswith("La formule Plus coûte 20 $.\n\nSources (pages ouvertes)")
     assert out.count("https://portal.example/cloud") == 1
+
+
+def test_the_note_gives_the_date_as_a_time_anchor():
+    import re
+    assert re.fullmatch(r"Today is [A-Z][a-z]+day \d{4}-\d{2}-\d{2}\.", gw._today())
+
+
+@pytest.mark.parametrize("question, latest", [
+    ("What is the latest model from Nous Research?", True),
+    ("Quel est le dernier modèle de Nous Research ?", True),
+    ("la dernière version de Hermes", True),
+    ("Newest RTX card?", True),
+    ("the most recent release", True),
+    ("la version la plus récente", True),
+    ("Spec of the RTX 5080", False),
+    ("Nous Research context window", False),
+    ("the latestness of things", False),
+])
+def test_the_note_points_latest_questions_at_the_makers_site(monkeypatch, question, latest):
+    ctx = setup_mw()
+    monkeypatch.setattr(gw, "_skill_auto_loaded", lambda: True)
+    note = ctx.hooks["pre_llm_call"](session_id="s1", user_message=question, is_first_turn=True)
+    expected = gw.NOTE_PREFIX + " " + gw._today() + (" " + gw.LATEST_SENTENCE if latest else "")
+    assert note == expected

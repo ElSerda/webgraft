@@ -23,6 +23,7 @@ import os
 import re
 import threading
 from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -133,6 +134,30 @@ SKILL_NAME = "webgraft:webgraft"
 FOOTER_SENTENCE = ("webgraft itself adds the list of the pages you opened under your answer; "
                    "do not write a sources list (a URL the user asks for is fine).")
 NO_FOOTER_SENTENCE = "End your answer with the URLs of the pages you used."
+# A time anchor next to the question: Hermes writes the date once, at the end of a system prompt of
+# about 10K tokens ("Conversation started: ..."), where a small model did not connect it with "latest"
+# (LFM3-1.7B named a 2025 model as Nous Research's newest, 2026-11-24). The user's message is new on
+# every turn, so the date costs no prompt-cache hit.
+TODAY_SENTENCE = "Today is {date}."
+
+
+def _today() -> str:
+    return TODAY_SENTENCE.format(date=datetime.now().astimezone().strftime("%A %Y-%m-%d"))
+
+
+# For "the latest X", catalogs and aggregators lag behind the maker's own site: LFM3-1.7B named a
+# 2025 model as Nous Research's newest after reading only catalogs, whatever the date said
+# (2026-11-24). Said next to the question, only when the question asks for the latest.
+LATEST_SENTENCE = ("For the latest: open the maker's own site (releases, news, blog) "
+                   "before catalogs and aggregators.")
+_LATEST = re.compile(r"\b(latest|newest|most recent|derni[eè]re?s?|plus r[ée]cente?s?|"
+                     r"[uú]ltim[oa]s?|neueste[nrs]?)\b", re.I)
+
+
+def _asks_latest(text: str) -> bool:
+    return bool(_LATEST.search(text))
+
+
 def _has_url(text: str) -> bool:
     """Whether a text holds an http(s) URL (a command, a script, a user message)."""
     low = text.casefold()
@@ -334,8 +359,8 @@ def _start_turn(session_id: str = "", user_message: Any = "", conversation_histo
         else:
             reminder = SHORT_URL_REMINDER if has_url else SHORT_REMINDER
         sources = "" if hidden else (FOOTER_SENTENCE if footer_on else NO_FOOTER_SENTENCE)
-        if reminder or sources:
-            parts.append(" ".join(s for s in (reminder or NOTE_PREFIX, sources) if s))
+        latest = LATEST_SENTENCE if _asks_latest(_text_of(user_message)) else ""
+        parts.append(" ".join(s for s in (reminder or NOTE_PREFIX, _today(), latest, sources) if s))
     if not _footers_hidden:
         heading = _footer_in_history(conversation_history, session_id)
         if heading and footer_on:
@@ -404,7 +429,8 @@ _LIST_MARKS = ("- ", "* ", "• ", "+ ")
 
 
 _SOURCE_QUALIFIERS = ("consultées", "consultés", "utilisées", "utilisés", "citées", "principales",
-                      "ouvertes", "used", "consulted", "cited", "opened")
+                      "principale", "vérifiées", "vérifiés", "ouvertes", "used", "consulted", "cited",
+                      "opened", "links", "checked", "verified")
 
 
 def _is_sources_heading(line: str) -> bool:
@@ -424,20 +450,59 @@ def _is_list_or_link(line: str) -> bool:
     return number.isdigit() and bool(rest)
 
 
+def _has_link(line: str) -> bool:
+    low = line.casefold()
+    return "http://" in low or "https://" in low
+
+
+def _drop_inner_sources(lines: list) -> list:
+    """*lines* without the sources blocks the model wrote above its last paragraph: a "Sources"
+    heading whose block, up to the next blank line, is only links. Small models (LFM3-1.7B) write
+    one, then add a closing note under it, so the block is not at the end; its URLs can name pages
+    never opened. A heading followed by plain names, or by text, is not a list of links: kept."""
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if _is_sources_heading(line) and len(line) <= 300:
+            j = i + 1
+            while j < len(lines) and lines[j].strip() and _is_list_or_link(lines[j]):
+                j += 1
+            block = lines[i + 1:j]
+            if (block and all(_has_link(b) for b in block)) or (not block and _has_link(line)):
+                while out and out[-1].strip() in ("", "---", "***", "___"):
+                    out.pop()
+                out.append("")
+                i = j
+                while i < len(lines) and not lines[i].strip():
+                    i += 1
+                continue
+        out.append(line)
+        i += 1
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and out[-1].strip() in ("", "---", "***", "___"):
+        out.pop()
+    return out
+
+
 def _drop_model_sources(text: str) -> str:
-    """*text* without a sources block the model closed it with (see above); unchanged otherwise."""
+    """*text* without the sources blocks the model wrote (see above); unchanged otherwise."""
+    original = text
+    inner = _drop_inner_sources(text.rstrip().split("\n"))
+    if any(line.strip() for line in inner):
+        text = "\n".join(inner)
     lines = text.rstrip().split("\n")
     i = len(lines) - 1
     while i >= 0 and _is_list_or_link(lines[i]) and not _is_sources_heading(lines[i]):
         i -= 1
     if i < 0 or not _is_sources_heading(lines[i]):
-        return text
+        return text if text.rstrip() != original.rstrip() else original
     if i == len(lines) - 1 and len(lines[i]) > 300:  # a long closing sentence, not a sources line
-        return text
+        return text if text.rstrip() != original.rstrip() else original
     kept = lines[:i]
     while kept and kept[-1].strip() in ("", "---", "***", "___"):
         kept.pop()
-    return "\n".join(kept) if kept else text
+    return "\n".join(kept) if kept else original
 
 
 def _skill_auto_loaded() -> bool:
